@@ -1,0 +1,151 @@
+name: Deploy (reusable)
+
+# Provisions one environment with Terragrunt (S3 + CloudFront + ACM + Route 53), then
+# builds the Flutter web app and publishes it. Called by deploy-dev.yml and
+# deploy-prod.yml; the GitHub environment of the same name provides the secrets/variables
+# and, for prod, the manual approval gate.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Target environment (dev or prod); also the GitHub environment name
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for requesting the JWT for AWS OIDC
+  contents: read # Required for actions/checkout
+
+env:
+  FLUTTER_VERSION: "3.47.5"
+  TERRAFORM_VERSION: "1.16.2"
+  TERRAGRUNT_VERSION: "1.1.5"
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    # Never run two applies against the same state at once.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      # Read by env.hcl. Without SUPPORT_EMAIL the certificate alerts would go to a
+      # placeholder address.
+      ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
+      SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+      TG_NON_INTERACTIVE: "true"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Each environment is a different AWS account, and the branch decides which one:
+      # develop -> dev, main -> prod. A manual run from any other branch
+      # must never assume another environment's role.
+      - name: Validate branch for the environment
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          case "$TARGET:$GITHUB_REF" in
+            dev:refs/heads/develop | prod:refs/heads/main) ;;
+            *)
+              echo "::error::Branch $GITHUB_REF cannot deploy the '$TARGET' environment"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate environment configuration
+        working-directory: environments/${{ inputs.environment }}
+        env:
+          TARGET: ${{ inputs.environment }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ROLE_ARN_SET: ${{ secrets.ROLE_ARN != '' }}
+          AWS_ACCOUNT_ID_SET: ${{ secrets.AWS_ACCOUNT_ID != '' }}
+          SUPPORT_EMAIL_SET: ${{ secrets.SUPPORT_EMAIL != '' }}
+        run: |
+          missing=0
+          for name in AWS_REGION ROUTE53_ZONE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable '$name' is not set in the '$TARGET' GitHub environment"
+              missing=1
+            fi
+          done
+          for secret in ROLE_ARN AWS_ACCOUNT_ID SUPPORT_EMAIL; do
+            flag="${secret}_SET"
+            if [ "${!flag}" != "true" ]; then
+              echo "::error::Secret '$secret' is not set in the '$TARGET' GitHub environment"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          # The provider region comes from env.hcl: the credentials must target the same one.
+          if ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" env.hcl; then
+            echo "::error file=environments/$TARGET/env.hcl::AWS_REGION ($AWS_REGION) does not match aws_region in env.hcl"
+            exit 1
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.ROLE_ARN }}
+          role-session-name: gha-web-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify target AWS account
+        env:
+          EXPECTED_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          ACTUAL_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$ACTUAL_ACCOUNT" != "$EXPECTED_ACCOUNT" ]; then
+            echo "::error::Credentials point to account $ACTUAL_ACCOUNT, expected $EXPECTED_ACCOUNT"
+            exit 1
+          fi
+
+      - name: Setup IaC Tooling
+        uses: ./.github/actions/setup-iac
+        with:
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
+
+      - name: Terragrunt Plan
+        working-directory: environments/${{ inputs.environment }}
+        run: terragrunt run --all plan
+
+      - name: Terragrunt Apply
+        working-directory: environments/${{ inputs.environment }}
+        run: terragrunt run --all apply
+
+      # The app is identical in every environment: the API URL and key are typed in the
+      # page (defaults in lib/constants.dart), so nothing environment-specific is built in.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build Flutter Web
+        working-directory: src/calculator_app
+        run: |
+          flutter pub get
+          flutter build web --release
+
+      - name: Publish web page
+        id: publish
+        working-directory: environments/${{ inputs.environment }}/edge/frontend
+        run: |
+          BUCKET=$(terragrunt output -raw bucket_name)
+          DISTRIBUTION_ID=$(terragrunt output -raw distribution_id)
+          WEBSITE_URL=$(terragrunt output -raw website_url)
+          aws s3 sync "$GITHUB_WORKSPACE/src/calculator_app/build/web" "s3://$BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+          echo "website_url=$WEBSITE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        env:
+          WEBSITE_URL: ${{ steps.publish.outputs.website_url }}
+        run: |
+          # Retries cover DNS propagation of a just-created domain and the invalidation.
+          curl -fsS --retry 10 --retry-delay 15 --retry-all-errors "$WEBSITE_URL/" | grep -qi "<title>Over-Engineered Calculator</title>"
+          echo "Smoke test passed: $WEBSITE_URL"

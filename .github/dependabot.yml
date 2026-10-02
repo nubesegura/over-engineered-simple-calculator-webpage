@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Flutter/Dart packages of the web app.
+  - package-ecosystem: pub
+    directory: /src/calculator_app
+    schedule:
+      interval: weekly
+
+  # Actions are pinned by commit SHA: Dependabot bumps the SHA and the version comment.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/setup-iac
+    schedule:
+      interval: weekly
+
+  # Provider constraints of the Terraform modules.
+  - package-ecosystem: terraform
+    directories:
+      - /modules/*
+    schedule:
+      interval: weekly

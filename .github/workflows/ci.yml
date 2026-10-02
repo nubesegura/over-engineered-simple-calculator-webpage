@@ -1,0 +1,93 @@
+name: CI
+
+# Quality gates. Runs on every pull request of the gitflow branches and is reused by the
+# deploy workflows, so nothing is applied unless the same checks pass on the pushed commit.
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: "3.47.5"
+  TERRAFORM_VERSION: "1.16.2"
+  TERRAGRUNT_VERSION: "1.1.5"
+
+jobs:
+  flutter:
+    name: Flutter (analyze, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/calculator_app
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build Web
+        run: flutter build web --release
+
+  iac:
+    name: IaC (format and team standards)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup IaC Tooling
+        uses: ./.github/actions/setup-iac
+        with:
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
+
+      - name: Terraform Format
+        run: terraform fmt -check -recursive modules
+
+      - name: Terragrunt HCL Format
+        working-directory: environments
+        run: terragrunt hcl fmt --check
+
+      - name: Validate mandatory tags in root.hcl
+        working-directory: environments
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          for key in team-owner project-name app-name repo-name env-type; do
+            if ! grep -qE "^\s*\"$key\"\s*=" root.hcl; then
+              echo "::error file=environments/root.hcl::Mandatory tag '$key' is missing from mandatory_tags"
+              exit 1
+            fi
+          done
+          if ! grep -qE "\"repo-name\"\s*=\s*\"$REPO_NAME\"" root.hcl; then
+            echo "::error file=environments/root.hcl::Tag 'repo-name' does not match the repository name ($REPO_NAME)"
+            exit 1
+          fi
+          echo "Mandatory tags present; repo-name = $REPO_NAME"
+
+      - name: Validate S3 remote state
+        working-directory: environments
+        run: |
+          if ! grep -qE '^\s*backend\s*=\s*"s3"' root.hcl; then
+            echo "::error file=environments/root.hcl::The S3 remote_state backend is missing or commented out"
+            exit 1
+          fi
+          echo "S3 remote state configured"
