@@ -46,6 +46,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   final TextEditingController _controllerApiKey = TextEditingController();
   String _result = '0';
   bool _isLoading = false;
+  bool _obscureApiKey = true;
   String _selectedOperation = ApiConstants.defaultOperation;
 
   final List<HistoryItem> _history = [];
@@ -261,12 +262,22 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                 TextField(
                   key: const Key('api-key-field'),
                   controller: _controllerApiKey,
-                  obscureText: true,
+                  obscureText: _obscureApiKey,
                   enableSuggestions: false,
                   autocorrect: false,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'API Key',
                     hintText: 'Optional (required by the sls backend)',
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscureApiKey ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _obscureApiKey = !_obscureApiKey;
+                        });
+                      },
+                    ),
                   ),
                   onChanged: (_) => setState(() => _result = '0'),
                 ),
