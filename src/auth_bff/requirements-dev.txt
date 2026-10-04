@@ -1,7 +1,7 @@
 # Compiled from pyproject.toml (extra: dev); do not edit by hand.
 # Regenerate: uv pip compile pyproject.toml --extra dev --universal --python-version 3.14 --no-annotate -o requirements-dev.txt
 ast-serialize==0.12.1
-boto3==1.43.106
+boto3==1.43.107
 botocore==1.43.106
 click==8.5.0
 colorama==0.4.6 ; sys_platform == 'win32'
