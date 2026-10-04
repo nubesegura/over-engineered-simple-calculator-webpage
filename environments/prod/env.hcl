@@ -17,6 +17,10 @@ locals {
   web_domain_name = "over-engineered-simple-calculator.nube-segura.com"
   route53_zone_id = get_env("ROUTE53_ZONE_ID", try(local.local_secrets.ROUTE53_ZONE_ID, ""))
 
+  # Existing WAFv2 web ACL (CloudFront scope, us-east-1) created outside this
+  # repository; GitHub environment variable WAF_WEB_ACL_ARN. The deploy fails when empty.
+  web_acl_arn = get_env("WAF_WEB_ACL_ARN", try(local.local_secrets.WAF_WEB_ACL_ARN, ""))
+
   # Every edge location.
   cloudfront_price_class = "PriceClass_All"
 
@@ -26,4 +30,13 @@ locals {
   # --- Alerts ---
   # Certificate expiry alarms (us-east-1). GitHub environment secret SUPPORT_EMAIL.
   alert_email = get_env("SUPPORT_EMAIL", try(local.local_secrets.SUPPORT_EMAIL, "alerts-prod@example.com"))
+
+  # --- Authentication ---
+  # Losing the pool loses every user (COG-04).
+  user_pool_deletion_protection = "ACTIVE"
+
+  # --- Auth BFF (Lambda) ---
+  bff_log_retention_days = 365
+  # X-Ray is active only in prod (LMB-07).
+  bff_tracing_mode = "Active"
 }

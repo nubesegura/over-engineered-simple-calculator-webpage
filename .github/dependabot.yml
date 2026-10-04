@@ -6,6 +6,12 @@ updates:
     schedule:
       interval: weekly
 
+  # Python development dependencies of the auth BFF (pinned in requirements-dev.txt).
+  - package-ecosystem: pip
+    directory: /src/auth_bff
+    schedule:
+      interval: weekly
+
   # Actions are pinned by commit SHA: Dependabot bumps the SHA and the version comment.
   - package-ecosystem: github-actions
     directories:

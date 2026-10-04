@@ -1,6 +1,7 @@
 import 'dart:convert';
 
-import 'package:calculator_app/api_client.dart';
+import 'package:calculator_app/auth/auth_api.dart';
+import 'package:calculator_app/auth/session_controller.dart';
 import 'package:calculator_app/constants.dart';
 import 'package:calculator_app/main.dart';
 import 'package:flutter/material.dart';
@@ -8,152 +9,139 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-const _baseUrl = 'https://api.example.com/api/sls/v1';
-
 http.Response _json(Object body, [int status = 200]) => http.Response(
       jsonEncode(body),
       status,
       headers: {'content-type': 'application/json'},
     );
 
+/// A BFF that always has a valid session.
+class SignedInAuthApi implements AuthApi {
+  @override
+  Future<TokenSet> refresh() async => const TokenSet(
+        idToken: 'id',
+        accessToken: 'access',
+        expiresIn: Duration(hours: 1),
+      );
+
+  @override
+  Future<TokenSet> login(String username, String password) => refresh();
+
+  @override
+  Future<void> logout() async {}
+}
+
+Future<void> _pumpCalculator(WidgetTester tester,
+    {http.Client? backend}) async {
+  await tester.pumpWidget(CalculatorApp(
+    httpClient: backend,
+    loginSupported: true,
+    session: SessionController(SignedInAuthApi()),
+  ));
+  await tester.pumpAndSettle();
+}
+
 void main() {
-  group('CalculatorApiClient', () {
-    test('calculate posts the operands with the API key', () async {
-      late http.Request captured;
-      final client = CalculatorApiClient(
-        baseUrl: '$_baseUrl/',
-        apiKey: ' secret ',
-        httpClient: MockClient((request) async {
-          captured = request;
-          return _json({'result': '5'});
-        }),
-      );
-
-      expect(await client.calculate('add', 2, 3), '5');
-      expect(captured.method, 'POST');
-      expect(captured.url.toString(), '$_baseUrl/add');
-      expect(captured.headers['x-api-key'], 'secret');
-      expect(jsonDecode(captured.body), {'a': 2.0, 'b': 3.0});
-    });
-
-    test('the API key header is omitted when empty', () async {
-      late http.Request captured;
-      final client = CalculatorApiClient(
-        baseUrl: _baseUrl,
-        httpClient: MockClient((request) async {
-          captured = request;
-          return _json({'result': '5'});
-        }),
-      );
-
-      await client.calculate('add', 2, 3);
-      expect(captured.headers.containsKey('x-api-key'), isFalse);
-    });
-
-    test('fetchHistory sends limit and cursor and parses the page', () async {
-      late http.Request captured;
-      final client = CalculatorApiClient(
-        baseUrl: _baseUrl,
-        httpClient: MockClient((request) async {
-          captured = request;
-          return _json({
-            'items': [
-              {
-                'calculation_id': 'id-1',
-                'operation': 'mul',
-                'a': '2',
-                'b': '4',
-                'result': '8',
-                'occurred_at': '2026-10-02T10:00:00+00:00',
-              },
-            ],
-            'next_cursor': 'next',
-          });
-        }),
-      );
-
-      final page = await client.fetchHistory(limit: 5, cursor: 'abc');
-
-      expect(captured.method, 'GET');
-      expect(captured.url.path, '/api/sls/v1/history');
-      expect(captured.url.queryParameters, {'limit': '5', 'cursor': 'abc'});
-      expect(page.nextCursor, 'next');
-      expect(page.items.single.result, '8');
-      expect(page.items.single.occurredAt, isNotNull);
-    });
-
-    test('error bodies are turned into readable messages', () async {
-      Future<ApiException> failWith(http.Response response) async {
-        final client = CalculatorApiClient(
-          baseUrl: _baseUrl,
-          httpClient: MockClient((_) async => response),
-        );
-        try {
-          await client.calculate('div', 1, 0);
-        } on ApiException catch (e) {
-          return e;
-        }
-        fail('ApiException expected');
-      }
-
-      final domain = await failWith(_json({
-        'error': {'code': 'DIVISION_BY_ZERO', 'message': 'Cannot divide by zero.'},
-      }, 400));
-      expect(domain.message, 'Cannot divide by zero.');
-      expect(domain.statusCode, 400);
-
-      final forbidden = await failWith(_json({'message': 'Forbidden'}, 403));
-      expect(forbidden.message, 'Forbidden');
-
-      final html = await failWith(http.Response('<html></html>', 502));
-      expect(html.message, 'Request failed (HTTP 502).');
-    });
-
-    test('network failures are reported without details', () async {
-      final client = CalculatorApiClient(
-        baseUrl: _baseUrl,
-        httpClient: MockClient((_) async => throw http.ClientException('boom')),
-      );
-
-      expect(
-        client.fetchHistory(),
-        throwsA(isA<ApiException>().having(
-          (e) => e.message,
-          'message',
-          'Connection to the server failed.',
-        )),
-      );
-    });
-
-    test('hasValidBaseUrl requires an absolute http(s) URL', () {
-      bool valid(String url) => CalculatorApiClient(baseUrl: url).hasValidBaseUrl;
-
-      expect(valid(_baseUrl), isTrue);
-      expect(valid('/api/ecs/v1'), isFalse);
-      expect(valid('ftp://example.com'), isFalse);
-      expect(valid(''), isFalse);
-    });
-  });
-
   group('CalculatorApp', () {
     testWidgets('smoke test', (WidgetTester tester) async {
-      await tester.pumpWidget(const CalculatorApp());
+      await _pumpCalculator(tester);
 
       expect(find.text('Over-Engineered Calculator'), findsWidgets);
     });
 
-    testWidgets('Service URL is prefilled and API key starts empty',
+    testWidgets('Service URL is prefilled and there is no API key field',
         (WidgetTester tester) async {
-      await tester.pumpWidget(const CalculatorApp());
+      await _pumpCalculator(tester);
 
       final urlField =
           tester.widget<TextField>(find.byKey(const Key('service-url-field')));
-      final apiKeyField =
-          tester.widget<TextField>(find.byKey(const Key('api-key-field')));
 
       expect(urlField.controller!.text, ApiConstants.defaultApiBaseUrl);
-      expect(apiKeyField.controller!.text, isEmpty);
-      expect(apiKeyField.obscureText, isTrue);
+      expect(find.byKey(const Key('api-key-field')), findsNothing);
+      expect(find.text('API Key'), findsNothing);
+    });
+
+    testWidgets('an empty or invalid Service URL keeps the validation message',
+        (WidgetTester tester) async {
+      await _pumpCalculator(tester);
+
+      await tester.enterText(find.byKey(const Key('service-url-field')), '');
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pump();
+
+      expect(
+        find.text('Result: Enter a valid Service URL (http:// or https://).'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+        'a plain http Service URL shows the https message and sends '
+        'nothing', (tester) async {
+      var requests = 0;
+      final backend = MockClient((request) async {
+        requests++;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester, backend: backend);
+
+      await tester.enterText(find.byKey(const Key('service-url-field')),
+          'http://api.example.com/api');
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pumpAndSettle();
+
+      expect(
+          find.text('Result: The Service URL must use https.'), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('history-refresh')));
+      await tester.tap(find.byKey(const Key('history-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.text('The Service URL must use https.'), findsOneWidget);
+      expect(requests, 0);
+    });
+
+    testWidgets('an http://localhost Service URL is allowed', (tester) async {
+      late http.Request captured;
+      final backend = MockClient((request) async {
+        captured = request;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester, backend: backend);
+
+      await tester.enterText(find.byKey(const Key('service-url-field')),
+          'http://localhost:8080/api');
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Result: 5'), findsOneWidget);
+      expect(captured.headers['Authorization'], 'Bearer id');
+    });
+
+    testWidgets('calculations send the bearer token', (tester) async {
+      late http.Request captured;
+      final backend = MockClient((request) async {
+        captured = request;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester, backend: backend);
+
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Result: 5'), findsOneWidget);
+      expect(captured.headers['Authorization'], 'Bearer id');
+      expect(captured.headers.containsKey('x-api-key'), isFalse);
     });
 
     testWidgets('history is loaded on demand and refreshed after a calculation',
@@ -183,9 +171,10 @@ void main() {
         return _json({'result': '5'});
       });
 
-      await tester.pumpWidget(CalculatorApp(httpClient: mock));
+      await _pumpCalculator(tester, backend: mock);
       expect(historyCalls, 0);
-      expect(find.text('Press refresh to load your calculations.'), findsOneWidget);
+      expect(find.text('Press refresh to load your calculations.'),
+          findsOneWidget);
 
       await tester.tap(find.byKey(const Key('history-refresh')));
       await tester.pumpAndSettle();
@@ -205,14 +194,50 @@ void main() {
 
     testWidgets('a service without history shows a friendly message',
         (WidgetTester tester) async {
-      final mock = MockClient((_) async => _json({'message': 'Not Found'}, 404));
+      final mock =
+          MockClient((_) async => _json({'message': 'Not Found'}, 404));
 
-      await tester.pumpWidget(CalculatorApp(httpClient: mock));
+      await _pumpCalculator(tester, backend: mock);
       await tester.ensureVisible(find.byKey(const Key('history-refresh')));
       await tester.tap(find.byKey(const Key('history-refresh')));
       await tester.pumpAndSettle();
 
-      expect(find.text('This service does not provide a history.'), findsOneWidget);
+      expect(find.text('This service does not provide a history.'),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'a backend that keeps answering 401 returns to the login screen '
+        'with the expiry message', (WidgetTester tester) async {
+      final mock = MockClient((_) async => _json({'message': 'No'}, 401));
+
+      await _pumpCalculator(tester, backend: mock);
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('login-email-field')), findsOneWidget);
+      expect(find.text('Your session has expired. Please log in again.'),
+          findsOneWidget);
+    });
+
+    testWidgets('a 403 keeps the calculator and shows the error',
+        (WidgetTester tester) async {
+      final mock = MockClient((_) async => _json({
+            'error': {'code': 'FORBIDDEN', 'message': 'Not allowed.'},
+          }, 403));
+
+      await _pumpCalculator(tester, backend: mock);
+      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+      await tester.ensureVisible(find.text('Calculate'));
+      await tester.tap(find.text('Calculate'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Result: Error: Not allowed.'), findsOneWidget);
+      expect(find.byKey(const Key('logout-button')), findsOneWidget);
     });
   });
 }

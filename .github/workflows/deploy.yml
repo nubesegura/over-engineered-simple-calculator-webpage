@@ -1,6 +1,7 @@
 name: Deploy (reusable)
 
-# Provisions one environment with Terragrunt (S3 + CloudFront + ACM + Route 53), then
+# Provisions one environment with Terragrunt (Cognito, the auth BFF function, S3 +
+# CloudFront + ACM + Route 53), then
 # builds the Flutter web app and publishes it. Called by deploy-dev.yml and
 # deploy-prod.yml; the GitHub environment of the same name provides the secrets/variables
 # and, for prod, the manual approval gate.
@@ -35,6 +36,7 @@ jobs:
       # placeholder address.
       ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
       SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+      WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
       TG_NON_INTERACTIVE: "true"
     steps:
       - name: Checkout Repository
@@ -78,6 +80,11 @@ jobs:
               missing=1
             fi
           done
+          # prod must be behind an existing web ACL (created outside this repository).
+          if [ "$TARGET" = "prod" ] && [ -z "$WAF_WEB_ACL_ARN" ]; then
+            echo "::error::Variable 'WAF_WEB_ACL_ARN' is not set in the 'prod' GitHub environment (ARN of an existing WAFv2 web ACL, CloudFront scope, us-east-1)"
+            missing=1
+          fi
           [ "$missing" -eq 0 ] || exit 1
           # The provider region comes from env.hcl: the credentials must target the same one.
           if ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" env.hcl; then
@@ -116,8 +123,29 @@ jobs:
         working-directory: environments/${{ inputs.environment }}
         run: terragrunt run --all apply
 
-      # The app is identical in every environment: the API URL and key are typed in the
-      # page (defaults in lib/constants.dart), so nothing environment-specific is built in.
+      # The backends (sls, ecs) trust this environment's user pool. The owner copies these
+      # two values by hand into the GitHub environment variables of the same name in each
+      # backend repository. They are identifiers, not secrets.
+      - name: Hand-off values for the backends
+        working-directory: environments/${{ inputs.environment }}/edge/auth
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          POOL_ID=$(terragrunt output -raw user_pool_id)
+          CLIENT_ID=$(terragrunt output -raw app_client_id)
+          {
+            echo "### Cognito hand-off ($TARGET)"
+            echo
+            echo "Create these variables in the '$TARGET' GitHub environment of each backend repository (sls, ecs):"
+            echo
+            echo '```'
+            echo "COGNITO_USER_POOL_ID=$POOL_ID"
+            echo "COGNITO_APP_CLIENT_ID=$CLIENT_ID"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The app is identical in every environment: the backend URL is typed in the
+      # page (default in lib/constants.dart) and the user logs in through the BFF, so nothing environment-specific is built in.
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -129,7 +157,7 @@ jobs:
         working-directory: src/calculator_app
         run: |
           flutter pub get
-          flutter build web --release
+          flutter build web --release --no-web-resources-cdn
 
       - name: Publish web page
         id: publish
@@ -149,3 +177,32 @@ jobs:
           # Retries cover DNS propagation of a just-created domain and the invalidation.
           curl -fsS --retry 10 --retry-delay 15 --retry-all-errors "$WEBSITE_URL/" | grep -qi "<title>Over-Engineered Calculator</title>"
           echo "Smoke test passed: $WEBSITE_URL"
+
+      # The BFF answers 401 (no refresh cookie) in JSON. A 200 HTML answer would mean the
+      # request fell through to the app page (custom error responses); a 403 would mean
+      # CloudFront is not allowed to invoke the function URL. For a POST, the signed
+      # request needs the SHA-256 of the body; the body is empty here.
+      - name: Smoke test BFF
+        env:
+          WEBSITE_URL: ${{ steps.publish.outputs.website_url }}
+        run: |
+          EMPTY_SHA256=$(printf '' | sha256sum | cut -d' ' -f1)
+          for attempt in $(seq 1 10); do
+            RESULT=$(curl -sS --retry 10 --retry-delay 15 --retry-all-errors \
+              -o /dev/null -w '%{http_code} %{content_type}' \
+              -X POST "$WEBSITE_URL/auth/refresh" \
+              -H "Content-Type: application/json" \
+              -H "X-Requested-With: XMLHttpRequest" \
+              -H "Origin: $WEBSITE_URL" \
+              -H "x-amz-content-sha256: $EMPTY_SHA256") || RESULT="curl-failed"
+            case "$RESULT" in
+              "401 application/json"*)
+                echo "BFF smoke test passed: $WEBSITE_URL/auth/refresh answered $RESULT"
+                exit 0
+                ;;
+            esac
+            echo "Attempt $attempt: got '$RESULT', expected '401 application/json'; retrying in 15 seconds"
+            sleep 15
+          done
+          echo "::error::POST /auth/refresh did not answer 401 with a JSON body"
+          exit 1

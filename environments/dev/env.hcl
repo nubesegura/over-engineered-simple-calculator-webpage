@@ -16,6 +16,9 @@ locals {
   web_domain_name = "over-engineered-simple-calculator.dev.nube-segura.com"
   route53_zone_id = get_env("ROUTE53_ZONE_ID", try(local.local_secrets.ROUTE53_ZONE_ID, ""))
 
+  # No web ACL in dev (cost); an existing one is associated only when its ARN is given.
+  web_acl_arn = ""
+
   # Cheapest edge locations (North America and Europe).
   cloudfront_price_class = "PriceClass_100"
 
@@ -25,4 +28,13 @@ locals {
   # --- Alerts ---
   # Certificate expiry alarms (us-east-1). GitHub environment secret SUPPORT_EMAIL.
   alert_email = get_env("SUPPORT_EMAIL", try(local.local_secrets.SUPPORT_EMAIL, "alerts-dev@example.com"))
+
+  # --- Authentication ---
+  # dev is ephemeral: the pool can be destroyed with the stack.
+  user_pool_deletion_protection = "INACTIVE"
+
+  # --- Auth BFF (Lambda) ---
+  bff_log_retention_days = 30
+  # X-Ray is active only in prod (LMB-07).
+  bff_tracing_mode = "PassThrough"
 }

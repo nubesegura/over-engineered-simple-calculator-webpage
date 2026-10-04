@@ -1,20 +1,54 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'api_client.dart';
+import 'auth/auth_api.dart';
+import 'auth/login_page.dart';
+import 'auth/session_controller.dart';
 import 'constants.dart';
 
 void main() {
   runApp(const CalculatorApp());
 }
 
-class CalculatorApp extends StatelessWidget {
-  /// [httpClient] is only injected by tests.
-  const CalculatorApp({super.key, this.httpClient});
+class CalculatorApp extends StatefulWidget {
+  /// [httpClient], [session] and [loginSupported] are only injected by tests.
+  const CalculatorApp({
+    super.key,
+    this.httpClient,
+    this.session,
+    this.loginSupported = kIsWeb,
+  });
 
+  /// Client for the calculator backends.
   final http.Client? httpClient;
+  final SessionController? session;
+
+  /// False outside the web build: there is no same-origin BFF or cookie jar.
+  final bool loginSupported;
+
+  @override
+  State<CalculatorApp> createState() => _CalculatorAppState();
+}
+
+class _CalculatorAppState extends State<CalculatorApp> {
+  late final SessionController _session =
+      widget.session ?? SessionController(HttpAuthApi());
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.loginSupported) unawaited(_session.restore());
+  }
+
+  @override
+  void dispose() {
+    _session.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -24,14 +58,39 @@ class CalculatorApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: CalculatorHomePage(httpClient: httpClient),
+      home: widget.loginSupported
+          ? ListenableBuilder(
+              listenable: _session,
+              builder: (context, _) => _gate(),
+            )
+          : const WebOnlyPage(),
     );
+  }
+
+  Widget _gate() {
+    switch (_session.state) {
+      case SessionState.restoring:
+        return const Scaffold(
+          body: Center(
+            child: CircularProgressIndicator(key: Key('session-loading')),
+          ),
+        );
+      case SessionState.unauthenticated:
+      case SessionState.expired:
+        return LoginPage(session: _session);
+      case SessionState.authenticated:
+        return CalculatorHomePage(
+          session: _session,
+          httpClient: widget.httpClient,
+        );
+    }
   }
 }
 
 class CalculatorHomePage extends StatefulWidget {
-  const CalculatorHomePage({super.key, this.httpClient});
+  const CalculatorHomePage({super.key, required this.session, this.httpClient});
 
+  final SessionController session;
   final http.Client? httpClient;
 
   @override
@@ -43,10 +102,8 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   final TextEditingController _controllerB = TextEditingController();
   final TextEditingController _controllerUrl =
       TextEditingController(text: ApiConstants.defaultApiBaseUrl);
-  final TextEditingController _controllerApiKey = TextEditingController();
   String _result = '0';
   bool _isLoading = false;
-  bool _obscureApiKey = true;
   String _selectedOperation = ApiConstants.defaultOperation;
 
   final List<HistoryItem> _history = [];
@@ -62,13 +119,12 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     _controllerA.dispose();
     _controllerB.dispose();
     _controllerUrl.dispose();
-    _controllerApiKey.dispose();
     super.dispose();
   }
 
   CalculatorApiClient _client() => CalculatorApiClient(
         baseUrl: _controllerUrl.text,
-        apiKey: _controllerApiKey.text,
+        tokens: widget.session,
         httpClient: widget.httpClient,
       );
 
@@ -77,7 +133,12 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
 
     final client = _client();
     if (!client.hasValidBaseUrl) {
-      setState(() => _result = 'Enter a valid Service URL (http:// or https://).');
+      setState(
+          () => _result = 'Enter a valid Service URL (http:// or https://).');
+      return;
+    }
+    if (!client.hasTrustedBaseUrl) {
+      setState(() => _result = untrustedUrlMessage);
       return;
     }
     final a = double.tryParse(_controllerA.text);
@@ -119,7 +180,12 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   Future<void> _loadHistory({bool more = false}) async {
     final client = _client();
     if (!client.hasValidBaseUrl) {
-      setState(() => _historyError = 'Enter a valid Service URL (http:// or https://).');
+      setState(() =>
+          _historyError = 'Enter a valid Service URL (http:// or https://).');
+      return;
+    }
+    if (!client.hasTrustedBaseUrl) {
+      setState(() => _historyError = untrustedUrlMessage);
       return;
     }
     setState(() {
@@ -127,7 +193,8 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
       _historyError = null;
     });
     try {
-      final page = await client.fetchHistory(cursor: more ? _historyCursor : null);
+      final page =
+          await client.fetchHistory(cursor: more ? _historyCursor : null);
       if (!mounted) return;
       setState(() {
         if (!more) _history.clear();
@@ -179,7 +246,9 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
           style: TextStyle(color: Theme.of(context).colorScheme.error));
     } else if (!_historyLoaded) {
       body = Text(
-        _historyLoading ? 'Loading...' : 'Press refresh to load your calculations.',
+        _historyLoading
+            ? 'Loading...'
+            : 'Press refresh to load your calculations.',
       );
     } else if (_history.isEmpty) {
       body = const Text('No calculations yet.');
@@ -200,7 +269,8 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
             ),
           if (_historyCursor != null)
             TextButton(
-              onPressed: _historyLoading ? null : () => _loadHistory(more: true),
+              onPressed:
+                  _historyLoading ? null : () => _loadHistory(more: true),
               child: const Text('Load more'),
             ),
         ],
@@ -236,9 +306,18 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Over-Engineered Calculator', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
+        title: const Text('Over-Engineered Calculator',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
+        actions: [
+          IconButton(
+            key: const Key('logout-button'),
+            tooltip: 'Log out',
+            icon: const Icon(Icons.logout),
+            onPressed: widget.session.logout,
+          ),
+        ],
       ),
       body: Center(
         child: SingleChildScrollView(
@@ -255,29 +334,6 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                   decoration: const InputDecoration(
                     labelText: 'Service URL',
                     hintText: 'https://api.example.com/api/sls/v1',
-                  ),
-                  onChanged: (_) => setState(() => _result = '0'),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  key: const Key('api-key-field'),
-                  controller: _controllerApiKey,
-                  obscureText: _obscureApiKey,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  decoration: InputDecoration(
-                    labelText: 'API Key',
-                    hintText: 'Optional (required by the sls backend)',
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _obscureApiKey ? Icons.visibility : Icons.visibility_off,
-                      ),
-                      onPressed: () {
-                        setState(() {
-                          _obscureApiKey = !_obscureApiKey;
-                        });
-                      },
-                    ),
                   ),
                   onChanged: (_) => setState(() => _result = '0'),
                 ),
@@ -319,12 +375,14 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(50),
                   ),
-                  child: const Text('Calculate', style: TextStyle(fontSize: 22)),
+                  child:
+                      const Text('Calculate', style: TextStyle(fontSize: 22)),
                 ),
                 const SizedBox(height: 32),
                 Text(
                   'Result: $_result',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                      fontSize: 22, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 24),
                 const Divider(),

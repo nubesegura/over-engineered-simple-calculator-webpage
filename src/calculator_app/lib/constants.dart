@@ -3,7 +3,7 @@
 /// The same build is served in dev and prod: the only thing that changes between
 /// backends (sls, ecs, eks) and environments is the service URL. Edit
 /// [defaultApiBaseUrl] to point the "Service URL" field at another backend by
-/// default; users can still override it (and set the API key) from the UI.
+/// default; users can still override it from the UI.
 class ApiConstants {
   const ApiConstants._();
 
@@ -14,9 +14,6 @@ class ApiConstants {
   ///   eks: https://EKS_DOMAIN/api/eks/v1
   static const String defaultApiBaseUrl =
       'https://api.over-engineered-simple-calculator.nube-segura.com/api/sls/v1';
-
-  /// Header read by API Gateway to authorize a request (sls backend).
-  static const String apiKeyHeader = 'x-api-key';
 
   /// Operations exposed by the backend. Each key is the path appended to the
   /// service URL (POST `<service url>/<key>`).
@@ -40,4 +37,28 @@ class ApiConstants {
   static const Duration historyRefreshDelay = Duration(seconds: 2);
 
   static const Duration requestTimeout = Duration(seconds: 15);
+}
+
+/// Settings of the login flow against the BFF served on the page's own origin.
+class AuthConstants {
+  const AuthConstants._();
+
+  static const String loginPath = '/auth/login';
+  static const String refreshPath = '/auth/refresh';
+  static const String logoutPath = '/auth/logout';
+
+  static const String requestedWithHeader = 'X-Requested-With';
+  static const String requestedWithValue = 'XMLHttpRequest';
+
+  /// Hex SHA-256 of the body; CloudFront needs it to sign POST requests.
+  static const String contentHashHeader = 'x-amz-content-sha256';
+
+  /// An ID token that expires in less than this is renewed before use.
+  static const Duration renewalMargin = Duration(seconds: 60);
+
+  static const String sessionExpiredMessage =
+      'Your session has expired. Please log in again.';
+
+  static const String webOnlyMessage =
+      'Login is only available in the web version.';
 }

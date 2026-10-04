@@ -1,0 +1,30 @@
+# Compiled from pyproject.toml (extra: dev); do not edit by hand.
+# Regenerate: uv pip compile pyproject.toml --extra dev --universal --python-version 3.14 --no-annotate -o requirements-dev.txt
+ast-serialize==0.12.1
+boto3==1.43.106
+botocore==1.43.106
+click==8.5.0
+colorama==0.4.6 ; sys_platform == 'win32'
+coverage==7.16.2
+grimp==3.17
+import-linter==2.15
+iniconfig==2.3.0
+jmespath==1.1.0
+librt==0.16.0 ; platform_python_implementation != 'PyPy'
+markdown-it-py==4.2.0
+mdurl==0.1.2
+mypy==2.3.1
+mypy-extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+pygments==2.21.0
+pytest==9.1.1
+pytest-cov==7.1.0
+python-dateutil==2.9.0.post0
+rich==15.0.0
+ruff==0.16.9
+s3transfer==0.19.2
+six==1.17.0
+typing-extensions==4.16.0
+urllib3==2.8.0

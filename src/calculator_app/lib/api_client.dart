@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'auth/auth_api.dart';
+import 'auth/token_source.dart';
 import 'constants.dart';
 
 /// An error to show to the user (the message is already human readable).
@@ -15,6 +17,9 @@ class ApiException implements Exception {
   @override
   String toString() => message;
 }
+
+/// Shown instead of sending the bearer token to an untrusted Service URL.
+const String untrustedUrlMessage = 'The Service URL must use https.';
 
 /// One calculation returned by `GET <service url>/history`.
 class HistoryItem {
@@ -57,14 +62,14 @@ class HistoryPage {
 class CalculatorApiClient {
   CalculatorApiClient({
     required String baseUrl,
-    String apiKey = '',
+    required TokenSource tokens,
     http.Client? httpClient,
   })  : _baseUrl = baseUrl.trim().replaceAll(RegExp(r'/+$'), ''),
-        _apiKey = apiKey.trim(),
+        _tokens = tokens,
         _http = httpClient ?? http.Client();
 
   final String _baseUrl;
-  final String _apiKey;
+  final TokenSource _tokens;
   final http.Client _http;
 
   /// True when the service URL is an absolute http(s) URL.
@@ -75,16 +80,22 @@ class CalculatorApiClient {
         (base.scheme == 'http' || base.scheme == 'https');
   }
 
-  Map<String, String> get _headers => {
-        if (_apiKey.isNotEmpty) ApiConstants.apiKeyHeader: _apiKey,
-      };
+  /// True when the bearer token may be sent to the service URL: `https`, or
+  /// `http` to `localhost` / `127.0.0.1` for local runs.
+  bool get hasTrustedBaseUrl {
+    final base = Uri.tryParse(_baseUrl);
+    if (base == null || !base.hasAuthority) return false;
+    if (base.scheme == 'https') return base.host.isNotEmpty;
+    return base.scheme == 'http' &&
+        (base.host == 'localhost' || base.host == '127.0.0.1');
+  }
 
   /// POST `<service url>/<operation>`; returns the result as the backend printed it.
   Future<String> calculate(String operation, double a, double b) async {
     final response = await _send(
-      () => _http.post(
+      (headers) => _http.post(
         Uri.parse('$_baseUrl/$operation'),
-        headers: {..._headers, 'Content-Type': 'application/json'},
+        headers: {...headers, 'Content-Type': 'application/json'},
         body: jsonEncode({'a': a, 'b': b}),
       ),
     );
@@ -107,7 +118,7 @@ class CalculatorApiClient {
         if (cursor != null) 'cursor': cursor,
       },
     );
-    final response = await _send(() => _http.get(uri, headers: _headers));
+    final response = await _send((headers) => _http.get(uri, headers: headers));
     final data = _decode(response);
     if (data is! Map || data['items'] is! List) {
       throw const ApiException('Unexpected response from the server.');
@@ -121,9 +132,26 @@ class CalculatorApiClient {
     );
   }
 
-  Future<http.Response> _send(Future<http.Response> Function() request) async {
+  /// Sends the request with the bearer token. A 401 renews the token once and
+  /// repeats the request once; a second 401 ends the session.
+  Future<http.Response> _send(
+    Future<http.Response> Function(Map<String, String> headers) request,
+  ) async {
+    if (!hasTrustedBaseUrl) throw const ApiException(untrustedUrlMessage);
     try {
-      final response = await request().timeout(ApiConstants.requestTimeout);
+      var token = await _tokens.validIdToken();
+      var response = await _attempt(request, token);
+      if (response.statusCode == 401) {
+        token = await _tokens.renewAfterRejection(token);
+        response = await _attempt(request, token);
+        if (response.statusCode == 401) {
+          _tokens.markExpired(token);
+          throw const ApiException(
+            AuthConstants.sessionExpiredMessage,
+            statusCode: 401,
+          );
+        }
+      }
       if (response.statusCode == 200) return response;
       throw ApiException(
         _errorMessage(response),
@@ -131,11 +159,20 @@ class CalculatorApiClient {
       );
     } on ApiException {
       rethrow;
+    } on AuthApiException catch (e) {
+      throw ApiException(e.message, statusCode: e.statusCode);
     } catch (_) {
       // Network failure, timeout or a CORS rejection (the browser hides the cause).
       throw const ApiException('Connection to the server failed.');
     }
   }
+
+  Future<http.Response> _attempt(
+    Future<http.Response> Function(Map<String, String> headers) request,
+    String token,
+  ) =>
+      request({'Authorization': 'Bearer $token'})
+          .timeout(ApiConstants.requestTimeout);
 
   dynamic _decode(http.Response response) {
     try {
