@@ -11,7 +11,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "boto3==1.43.106",
-    "botocore==1.43.106",
+    "botocore==1.43.107",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
     "ruff==0.16.9",
