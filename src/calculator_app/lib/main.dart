@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import 'api_address.dart';
 import 'api_client.dart';
 import 'auth/auth_api.dart';
 import 'auth/login_page.dart';
@@ -21,10 +22,14 @@ class CalculatorApp extends StatefulWidget {
     this.httpClient,
     this.session,
     this.loginSupported = kIsWeb,
+    this.apiBaseUrl,
   });
 
   /// Client for the calculator backends.
   final http.Client? httpClient;
+
+  /// API address; derived from the page host when null.
+  final String? apiBaseUrl;
   final SessionController? session;
 
   /// False outside the web build: there is no same-origin BFF or cookie jar.
@@ -82,16 +87,25 @@ class _CalculatorAppState extends State<CalculatorApp> {
         return CalculatorHomePage(
           session: _session,
           httpClient: widget.httpClient,
+          apiBaseUrl: widget.apiBaseUrl ?? deriveApiBaseUrl(),
         );
     }
   }
 }
 
 class CalculatorHomePage extends StatefulWidget {
-  const CalculatorHomePage({super.key, required this.session, this.httpClient});
+  const CalculatorHomePage({
+    super.key,
+    required this.session,
+    required this.apiBaseUrl,
+    this.httpClient,
+  });
 
   final SessionController session;
   final http.Client? httpClient;
+
+  /// Read-only API address; empty when the page host has none.
+  final String apiBaseUrl;
 
   @override
   State<CalculatorHomePage> createState() => _CalculatorHomePageState();
@@ -100,8 +114,6 @@ class CalculatorHomePage extends StatefulWidget {
 class _CalculatorHomePageState extends State<CalculatorHomePage> {
   final TextEditingController _controllerA = TextEditingController();
   final TextEditingController _controllerB = TextEditingController();
-  final TextEditingController _controllerUrl =
-      TextEditingController(text: ApiConstants.defaultApiBaseUrl);
   String _result = '0';
   bool _isLoading = false;
   String _selectedOperation = ApiConstants.defaultOperation;
@@ -118,27 +130,30 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     _historyRefreshTimer?.cancel();
     _controllerA.dispose();
     _controllerB.dispose();
-    _controllerUrl.dispose();
     super.dispose();
   }
 
   CalculatorApiClient _client() => CalculatorApiClient(
-        baseUrl: _controllerUrl.text,
+        baseUrl: widget.apiBaseUrl,
         tokens: widget.session,
         httpClient: widget.httpClient,
       );
+
+  /// Why requests cannot be sent, or null when the address is usable.
+  String? _addressProblem(CalculatorApiClient client) {
+    if (widget.apiBaseUrl.isEmpty) return ApiConstants.noApiAddressMessage;
+    if (!client.hasValidBaseUrl) return ApiConstants.invalidApiAddressMessage;
+    if (!client.hasTrustedBaseUrl) return untrustedUrlMessage;
+    return null;
+  }
 
   Future<void> _calculate() async {
     if (_controllerA.text.isEmpty || _controllerB.text.isEmpty) return;
 
     final client = _client();
-    if (!client.hasValidBaseUrl) {
-      setState(
-          () => _result = 'Enter a valid Service URL (http:// or https://).');
-      return;
-    }
-    if (!client.hasTrustedBaseUrl) {
-      setState(() => _result = untrustedUrlMessage);
+    final problem = _addressProblem(client);
+    if (problem != null) {
+      setState(() => _result = problem);
       return;
     }
     final a = double.tryParse(_controllerA.text);
@@ -179,13 +194,9 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   /// Loads the first page (replacing the list) or, with [more], the next one.
   Future<void> _loadHistory({bool more = false}) async {
     final client = _client();
-    if (!client.hasValidBaseUrl) {
-      setState(() =>
-          _historyError = 'Enter a valid Service URL (http:// or https://).');
-      return;
-    }
-    if (!client.hasTrustedBaseUrl) {
-      setState(() => _historyError = untrustedUrlMessage);
+    final problem = _addressProblem(client);
+    if (problem != null) {
+      setState(() => _historyError = problem);
       return;
     }
     setState(() {
@@ -327,15 +338,14 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                TextField(
-                  key: const Key('service-url-field'),
-                  controller: _controllerUrl,
-                  keyboardType: TextInputType.url,
-                  decoration: const InputDecoration(
-                    labelText: 'Service URL',
-                    hintText: 'https://api.example.com/api/sls/v1',
+                InputDecorator(
+                  decoration: const InputDecoration(labelText: 'Service URL'),
+                  child: SelectableText(
+                    widget.apiBaseUrl.isEmpty
+                        ? ApiConstants.noApiAddressMessage
+                        : widget.apiBaseUrl,
+                    key: const Key('service-url-label'),
                   ),
-                  onChanged: (_) => setState(() => _result = '0'),
                 ),
                 const SizedBox(height: 32),
                 TextField(

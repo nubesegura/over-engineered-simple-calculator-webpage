@@ -37,4 +37,14 @@ locals {
   bff_log_retention_days = 30
   # X-Ray is active only in prod (LMB-07).
   bff_tracing_mode = "PassThrough"
+
+  # --- API hostname (api.<web domain>) ---
+  # Routing weights per backend, from the GitHub environment variables API_WEIGHT_SLS and
+  # API_WEIGHT_ECS. An unset or non-numeric variable counts as 0; the module refuses a plan
+  # where every published backend has weight 0. To add a backend: one entry here and one
+  # variable in the deploy workflow.
+  api_backends = {
+    sls = try(tonumber(get_env("API_WEIGHT_SLS", try(local.local_secrets.API_WEIGHT_SLS, "0"))), 0)
+    ecs = try(tonumber(get_env("API_WEIGHT_ECS", try(local.local_secrets.API_WEIGHT_ECS, "0"))), 0)
+  }
 }

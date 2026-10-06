@@ -68,8 +68,10 @@ remote_state {
   }
   config = {
     # One state bucket per environment; the account ID keeps the global name unique.
-    bucket       = "bckt-${local.region_code}-tf-state-${local.env}-${local.account_id}"
-    key          = "over-engineered-simple-calculator-webpage/${path_relative_to_include()}/terraform.tfstate"
+    bucket = "bckt-${local.region_code}-tf-state-${local.env}-${local.account_id}"
+    # Forward slashes on every OS: on Windows path_relative_to_include() returns backslashes, which would point a local run
+    # at a different state key than the CI.
+    key          = "over-engineered-simple-calculator-webpage/${replace(path_relative_to_include(), "\\", "/")}/terraform.tfstate"
     region       = local.region
     encrypt      = true
     use_lockfile = true # Use native S3 locking

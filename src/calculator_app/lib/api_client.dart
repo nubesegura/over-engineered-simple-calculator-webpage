@@ -18,8 +18,8 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-/// Shown instead of sending the bearer token to an untrusted Service URL.
-const String untrustedUrlMessage = 'The Service URL must use https.';
+/// Shown instead of sending the bearer token to an untrusted API address.
+const String untrustedUrlMessage = 'The API address must use https.';
 
 /// One calculation returned by `GET <service url>/history`.
 class HistoryItem {

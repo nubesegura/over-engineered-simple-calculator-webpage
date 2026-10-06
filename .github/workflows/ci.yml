@@ -150,7 +150,7 @@ jobs:
       - name: Validate Modules
         run: |
           set -euo pipefail
-          for module in auth auth-bff; do
+          for module in auth auth-bff api-hostname; do
             echo "::group::terraform validate modules/$module"
             terraform -chdir="modules/$module" init -backend=false -input=false
             terraform -chdir="modules/$module" validate

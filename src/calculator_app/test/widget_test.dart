@@ -31,13 +31,24 @@ class SignedInAuthApi implements AuthApi {
   Future<void> logout() async {}
 }
 
+const _address = 'https://api.calc.example.test/api/v1';
+
 Future<void> _pumpCalculator(WidgetTester tester,
-    {http.Client? backend}) async {
+    {http.Client? backend, String apiBaseUrl = _address}) async {
   await tester.pumpWidget(CalculatorApp(
     httpClient: backend,
     loginSupported: true,
+    apiBaseUrl: apiBaseUrl,
     session: SessionController(SignedInAuthApi()),
   ));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _calculate(WidgetTester tester) async {
+  await tester.enterText(find.byKey(const Key('first-number-field')), '2');
+  await tester.enterText(find.byKey(const Key('second-number-field')), '3');
+  await tester.ensureVisible(find.text('Calculate'));
+  await tester.tap(find.text('Calculate'));
   await tester.pumpAndSettle();
 }
 
@@ -49,63 +60,8 @@ void main() {
       expect(find.text('Over-Engineered Calculator'), findsWidgets);
     });
 
-    testWidgets('Service URL is prefilled and there is no API key field',
+    testWidgets('the address is a read-only label and requests use it',
         (WidgetTester tester) async {
-      await _pumpCalculator(tester);
-
-      final urlField =
-          tester.widget<TextField>(find.byKey(const Key('service-url-field')));
-
-      expect(urlField.controller!.text, ApiConstants.defaultApiBaseUrl);
-      expect(find.byKey(const Key('api-key-field')), findsNothing);
-      expect(find.text('API Key'), findsNothing);
-    });
-
-    testWidgets('an empty or invalid Service URL keeps the validation message',
-        (WidgetTester tester) async {
-      await _pumpCalculator(tester);
-
-      await tester.enterText(find.byKey(const Key('service-url-field')), '');
-      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
-      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
-      await tester.ensureVisible(find.text('Calculate'));
-      await tester.tap(find.text('Calculate'));
-      await tester.pump();
-
-      expect(
-        find.text('Result: Enter a valid Service URL (http:// or https://).'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets(
-        'a plain http Service URL shows the https message and sends '
-        'nothing', (tester) async {
-      var requests = 0;
-      final backend = MockClient((request) async {
-        requests++;
-        return _json({'result': '5'});
-      });
-      await _pumpCalculator(tester, backend: backend);
-
-      await tester.enterText(find.byKey(const Key('service-url-field')),
-          'http://api.example.com/api');
-      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
-      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
-      await tester.ensureVisible(find.text('Calculate'));
-      await tester.tap(find.text('Calculate'));
-      await tester.pumpAndSettle();
-
-      expect(
-          find.text('Result: The Service URL must use https.'), findsOneWidget);
-      await tester.ensureVisible(find.byKey(const Key('history-refresh')));
-      await tester.tap(find.byKey(const Key('history-refresh')));
-      await tester.pumpAndSettle();
-      expect(find.text('The Service URL must use https.'), findsOneWidget);
-      expect(requests, 0);
-    });
-
-    testWidgets('an http://localhost Service URL is allowed', (tester) async {
       late http.Request captured;
       final backend = MockClient((request) async {
         captured = request;
@@ -113,13 +69,72 @@ void main() {
       });
       await _pumpCalculator(tester, backend: backend);
 
-      await tester.enterText(find.byKey(const Key('service-url-field')),
-          'http://localhost:8080/api');
-      await tester.enterText(find.byKey(const Key('first-number-field')), '2');
-      await tester.enterText(find.byKey(const Key('second-number-field')), '3');
-      await tester.ensureVisible(find.text('Calculate'));
-      await tester.tap(find.text('Calculate'));
+      expect(find.byKey(const Key('service-url-label')), findsOneWidget);
+      expect(find.text(_address), findsOneWidget);
+      expect(find.byKey(const Key('service-url-field')), findsNothing);
+      expect(
+        find.ancestor(
+            of: find.text(_address), matching: find.byType(TextField)),
+        findsNothing,
+      );
+      expect(find.text('API Key'), findsNothing);
+
+      await _calculate(tester);
+
+      expect(find.text('Result: 5'), findsOneWidget);
+      expect(captured.url.toString(), '$_address/add');
+    });
+
+    testWidgets('without an address the page explains it and sends nothing',
+        (tester) async {
+      var requests = 0;
+      final backend = MockClient((request) async {
+        requests++;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester, backend: backend, apiBaseUrl: '');
+
+      await _calculate(tester);
+      expect(find.text('Result: ${ApiConstants.noApiAddressMessage}'),
+          findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('history-refresh')));
+      await tester.tap(find.byKey(const Key('history-refresh')));
       await tester.pumpAndSettle();
+
+      expect(requests, 0);
+    });
+
+    testWidgets(
+        'a plain http build value shows the https message and sends '
+        'nothing', (tester) async {
+      var requests = 0;
+      final backend = MockClient((request) async {
+        requests++;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester,
+          backend: backend, apiBaseUrl: 'http://api.example.com/api');
+
+      await _calculate(tester);
+      expect(
+          find.text('Result: The API address must use https.'), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('history-refresh')));
+      await tester.tap(find.byKey(const Key('history-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.text('The API address must use https.'), findsOneWidget);
+      expect(requests, 0);
+    });
+
+    testWidgets('an http://localhost build value is allowed', (tester) async {
+      late http.Request captured;
+      final backend = MockClient((request) async {
+        captured = request;
+        return _json({'result': '5'});
+      });
+      await _pumpCalculator(tester,
+          backend: backend, apiBaseUrl: 'http://localhost:8080/api');
+
+      await _calculate(tester);
 
       expect(find.text('Result: 5'), findsOneWidget);
       expect(captured.headers['Authorization'], 'Bearer id');

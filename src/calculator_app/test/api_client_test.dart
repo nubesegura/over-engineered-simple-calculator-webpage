@@ -291,12 +291,12 @@ void main() {
       await expectLater(
         client.calculate('add', 2, 3),
         throwsA(isA<ApiException>().having(
-            (e) => e.message, 'message', 'The Service URL must use https.')),
+            (e) => e.message, 'message', 'The API address must use https.')),
       );
       await expectLater(
         client.fetchHistory(),
         throwsA(isA<ApiException>().having(
-            (e) => e.message, 'message', 'The Service URL must use https.')),
+            (e) => e.message, 'message', 'The API address must use https.')),
       );
 
       expect(requests, isEmpty);

@@ -1,19 +1,24 @@
 /// API settings shared by every deployment of the calculator frontend.
 ///
-/// The same build is served in dev and prod: the only thing that changes between
-/// backends (sls, ecs, eks) and environments is the service URL. Edit
-/// [defaultApiBaseUrl] to point the "Service URL" field at another backend by
-/// default; users can still override it from the UI.
+/// The same build is served in dev and prod. The API address is derived from the
+/// host of the page (see `api_address.dart`); one shared hostname serves every
+/// backend, so the page never names a backend.
 class ApiConstants {
   const ApiConstants._();
 
-  /// Backend used to prefill the "Service URL" field. Include the version path,
-  /// without a trailing slash. Known backends:
-  ///   sls: https://api.over-engineered-simple-calculator.nube-segura.com/api/sls/v1
-  ///   ecs: https://ECS_DOMAIN/api/ecs/v1 (no history endpoint)
-  ///   eks: https://EKS_DOMAIN/api/eks/v1
-  static const String defaultApiBaseUrl =
-      'https://api.over-engineered-simple-calculator.nube-segura.com/api/sls/v1';
+  /// Version path appended to the API hostname, without a trailing slash.
+  static const String apiVersionPath = '/api/v1';
+
+  /// Subdomain prepended to the host of the page to get the API hostname.
+  static const String apiSubdomain = 'api';
+
+  /// Shown instead of sending requests when the page has no API address.
+  static const String noApiAddressMessage =
+      'No API address for this host. Open the site through its domain name.';
+
+  /// Shown when the build-time API address is not an absolute http(s) URL.
+  static const String invalidApiAddressMessage =
+      'The API address is not a valid http(s) URL.';
 
   /// Operations exposed by the backend. Each key is the path appended to the
   /// service URL (POST `<service url>/<key>`).
