@@ -1,7 +1,8 @@
 name: Deploy PROD
 
-# Gitflow: every push to main deploys prod. The "prod" GitHub environment must have
-# required reviewers, so the apply waits for a manual approval.
+# Gitflow: every push to main deploys prod. The "prod" GitHub environment should have
+# required reviewers so the apply waits for a manual approval (recommended; none is configured today:
+# owner exception, single-user organization).
 on:
   push:
     branches:

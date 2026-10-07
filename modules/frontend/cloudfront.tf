@@ -52,8 +52,9 @@ resource "aws_cloudfront_response_headers_policy" "security" {
       override     = true
     }
 
-    # Content Security Policy (design 3.12). connect-src allows any https URL because the
-    # Service URL of the backend is typed by the user. The build serves CanvasKit and
+    # Content Security Policy (design 3.12). connect-src allows any https URL. The Service URL is now a
+    # read-only label derived from the page origin (https://api.<site>/api/v1), so this is wider than needed:
+    # it can be narrowed to that host once confirmed in a browser. The build serves CanvasKit and
     # fonts from this origin (--no-web-resources-cdn), so no third-party host is needed.
     # Validate in a browser in dev before prod and loosen only what is blocked.
     content_security_policy {

@@ -231,7 +231,7 @@ Dependabot (`.github/dependabot.yml`, weekly): `pub` (`/src/calculator_app`), `p
 
 `lib/api_address.dart` (`deriveApiBaseUrl`) returns the API base URL: the build-time value `API_BASE_URL` (`String.fromEnvironment`) when it is not empty, otherwise `https://api.<host of the page>/api/v1`. `api` (`ApiConstants.apiSubdomain`) and `/api/v1` (`ApiConstants.apiVersionPath`) are constants in `lib/constants.dart`; no domain name is in the source. A host that is `localhost`, an IP address, contains a colon or has no dots gives an empty address, and `main.dart` shows `ApiConstants.noApiAddressMessage` in the read-only label (`SelectableText`, key `service-url-label`) instead of sending a request.
 
-`lib/api_client.dart` sends `Authorization: Bearer <ID token>` only when the address is trusted: scheme `https` with a host, or `http` to `localhost` or `127.0.0.1` for local runs (overrides). For any other URL the page shows "The Service URL must use https." (calculation and history) and makes no request that carries the token.
+`lib/api_client.dart` sends `Authorization: Bearer <ID token>` only when the address is trusted: scheme `https` with a host, or `http` to `localhost` or `127.0.0.1` for local runs (overrides). For any other URL the page shows "The API address must use https." (calculation and history) and makes no request that carries the token.
 
 ## Shared API hostname (owned elsewhere)
 

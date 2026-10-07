@@ -48,7 +48,7 @@ The **Service URL** (below the title, after login) is a **read-only label**: you
 - If the site was built with an explicit API address (optional build setting), the label shows that address instead.
 - On a host without a domain name (local development on `localhost` or an IP address) there is no address: the label shows "No API address for this host. Open the site through its domain name." and no request is made.
 - If the configured address is not a valid http(s) URL the page shows "The API address is not a valid http(s) URL."
-- The page sends your login token only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for local runs). For any other `http` address it shows "The Service URL must use https." and sends nothing, so the token is never sent over an unencrypted connection.
+- The page sends your login token only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for local runs). For any other `http` address it shows "The API address must use https." and sends nothing, so the token is never sent over an unencrypted connection.
 
 ## Calculations and history (unchanged)
 

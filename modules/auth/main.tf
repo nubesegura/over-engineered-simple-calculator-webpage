@@ -23,8 +23,8 @@ resource "aws_cognito_user_pool" "this" {
   # Cheapest tier. LITE covers every setting below (admin-only user creation, email as
   # username, password policy, MFA off, admin-only recovery, USER_PASSWORD_AUTH and
   # token revocation). Threat protection / advanced security is NOT used, and it is the
-  # only feature here that would need a higher tier (Plus). Not confirmed against a
-  # deployed pool: `plan` is pending the owner's approval.
+  # only feature here that would need a higher tier (Plus). Confirmed on the pool
+  # deployed in dev (tier LITE).
   user_pool_tier = "LITE"
 
   deletion_protection = var.user_pool_deletion_protection
@@ -63,7 +63,7 @@ resource "aws_cognito_user_pool_client" "this" {
   user_pool_id = aws_cognito_user_pool.this.id
 
   # Confidential client: Cognito generates a secret (stored in SSM below). Changing this
-  # replaces the client (new client ID); nothing is deployed yet.
+  # replaces the client (new client ID and secret), and the BFF and every backend would need the new values.
   generate_secret = true
 
   explicit_auth_flows = [
