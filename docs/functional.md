@@ -1,6 +1,6 @@
 # Functional documentation
 
-The calculator page lets a logged-in user do arithmetic (add, subtract, multiply, divide) against a backend and see the history of calculations. The page is shared by every backend version; the user chooses the backend with the **Service URL** field.
+The calculator page lets a logged-in user do arithmetic (add, subtract, multiply, divide) against a backend and see the history of calculations. The page is shared by every backend version; the backend is chosen by the owner in DNS, not by the user: the **Service URL** is a read-only label.
 
 ## Who can use it
 
@@ -43,7 +43,12 @@ The **Log out** button (top right of the calculator) ends the session: the page 
 
 ## Service URL
 
-The **Service URL** field (below the title, after login) holds the backend address, including the version path. It is prefilled with the default backend. If it is empty or not an http(s) URL, the result area shows "Enter a valid Service URL (http:// or https://)." The page sends your login token to the backend automatically, but only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for local runs). For any other `http` address it shows "The Service URL must use https." and sends nothing, so the token is never sent over an unencrypted connection.
+The **Service URL** (below the title, after login) is a **read-only label**: you cannot edit it. It shows the address the page uses, `https://api.<the site you opened>/api/v1`; for example, on the prod site it shows the `api.` address of the same domain. The page does not know which backend answers: the owner decides that in DNS, so the page does not change when traffic moves from one backend to another.
+
+- If the site was built with an explicit API address (optional build setting), the label shows that address instead.
+- On a host without a domain name (local development on `localhost` or an IP address) there is no address: the label shows "No API address for this host. Open the site through its domain name." and no request is made.
+- If the configured address is not a valid http(s) URL the page shows "The API address is not a valid http(s) URL."
+- The page sends your login token only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for local runs). For any other `http` address it shows "The Service URL must use https." and sends nothing, so the token is never sent over an unencrypted connection.
 
 ## Calculations and history (unchanged)
 
