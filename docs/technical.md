@@ -18,8 +18,7 @@ src/auth_bff/                  BFF Lambda
 modules/auth/                  Cognito user pool, confidential app client, SSM parameter with the client secret
 modules/auth-bff/              Lambda, function URL, role, log group, SNS topic, alarms
 modules/frontend/              S3, CloudFront (two origins), response headers policy, ACM, Route 53, Lambda permissions
-modules/api-hostname/          Regional ACM certificate for api.<web domain>, weighted alias records per backend, expiry alarms
-environments/                  root.hcl, common/*.hcl, <env>/env.hcl, <env>/edge/{auth,auth-bff,frontend}, <env>/api-hostname
+environments/                  root.hcl, common/*.hcl, <env>/env.hcl, <env>/edge/{auth,auth-bff,frontend}
 ```
 
 Layers of the BFF (enforced by import-linter): `config -> adapters -> application -> domain`. Domain and application must not import `boto3` or `botocore` (the SSM read goes through the `SecretReader` port); inbound adapters must not import outbound adapters.
@@ -222,11 +221,11 @@ One JSON line per request with `endpoint`, `status`, `outcome` (`ok` or the erro
 - Flutter: `flutter pub get`, `flutter analyze`, `flutter test`, `flutter build web --release --no-web-resources-cdn`.
 - BFF (`src/auth_bff`, Python 3.14): `pip install -r requirements-dev.txt` (fully pinned, compiled from `pyproject.toml`, so CI installs only pinned packages) and `pip install --no-deps -e .`, `pip-audit` (pinned version) over `requirements-dev.txt`, `ruff check .`, `ruff format --check .`, `mypy src handler.py` (strict), `lint-imports`, `pytest` (coverage gate 85%, `--cov-fail-under=85`).
 - IaC: `terraform fmt -check -recursive modules`, `terragrunt hcl fmt --check`, mandatory tags in `root.hcl` (`repo-name` equals the repository name), S3 remote state present.
-- Terraform validate (no credentials): `terraform init -backend=false` and `terraform validate` for `modules/auth`, `modules/auth-bff` and `modules/api-hostname`, and for `modules/frontend` through a temporary root in the runner's temp directory that declares both provider aliases.
+- Terraform validate (no credentials): `terraform init -backend=false` and `terraform validate` for `modules/auth` and `modules/auth-bff`, and for `modules/frontend` through a temporary root in the runner's temp directory that declares both provider aliases.
 
 Dependabot (`.github/dependabot.yml`, weekly): `pub` (`/src/calculator_app`), `pip` (`/src/auth_bff`), `github-actions` and `terraform` (`/modules/*`).
 
-`deploy.yml` adds: environment validation (secrets `ROLE_ARN`, `AWS_ACCOUNT_ID`, `SUPPORT_EMAIL`, variables `AWS_REGION`, `ROUTE53_ZONE_ID`, at least one of `API_WEIGHT_SLS` and `API_WEIGHT_ECS`, and `WAF_WEB_ACL_ARN` in prod), branch check, OIDC login, account check, plan, apply, the Cognito hand-off summary, build, publish, the page smoke test and the BFF smoke test. The Flutter build adds `--dart-define=API_BASE_URL=<value>` only when the GitHub variable `API_BASE_URL` is set.
+`deploy.yml` adds: environment validation (secrets `ROLE_ARN`, `AWS_ACCOUNT_ID`, `SUPPORT_EMAIL`, variables `AWS_REGION`, `ROUTE53_ZONE_ID`, and `WAF_WEB_ACL_ARN` in prod), branch check, OIDC login, account check, plan, apply, the Cognito hand-off summary, build, publish, the page smoke test and the BFF smoke test. The Flutter build adds `--dart-define=API_BASE_URL=<value>` only when the GitHub variable `API_BASE_URL` is set.
 
 ## Page: the API address and where the bearer token is sent
 
@@ -234,19 +233,8 @@ Dependabot (`.github/dependabot.yml`, weekly): `pub` (`/src/calculator_app`), `p
 
 `lib/api_client.dart` sends `Authorization: Bearer <ID token>` only when the address is trusted: scheme `https` with a host, or `http` to `localhost` or `127.0.0.1` for local runs (overrides). For any other URL the page shows "The Service URL must use https." (calculation and history) and makes no request that carries the token.
 
-## Shared API hostname (`modules/api-hostname`)
+## Shared API hostname (owned elsewhere)
 
-Rationale: [ADR 0006](adr/0006-weights-owned-by-the-webpage-repository.md) and [ADR 0007](adr/0007-neutral-api-path.md). Unit `environments/<env>/api-hostname` (identical in both environments, config in `environments/common/api-hostname.hcl`, no dependency on the edge units, state key `<repo>/<env>/api-hostname/terraform.tfstate`).
+Since 2026-10-07 the API certificate, the SSM parameter `/oecalc/<env>/api-certificate-arn`, the weighted Route 53 records, the weights and the certificate expiry alarms with their SNS topic belong to the repository `over-engineered-simple-calculator-shared-resources` (its documentation describes the module, the weights and the contract with the backends). This repository has no `api-hostname` module or unit and no `API_WEIGHT_*` variables. [ADR 0006](adr/0006-weights-owned-by-the-webpage-repository.md) is superseded; [ADR 0007](adr/0007-neutral-api-path.md) (neutral path `/api/v1`) still applies.
 
-Inputs (from `env.hcl`): `web_domain_name`, `zone_id` (`ROUTE53_ZONE_ID`), `backends` (map name to weight), `alert_email` (`SUPPORT_EMAIL`), `certificate_expiry_alert_days` (default 90, 60, 30, 15). Outputs: `certificate_arn`, `api_domain_name`, `active_backends`.
-
-- **Certificate:** `aws_acm_certificate.api` for `api.<web domain>` in the deployment region (us-east-2), DNS validation, RSA 2048, `create_before_destroy`; a precondition fails the plan when the hostname is not under the hosted zone. Validation record with `allow_overwrite = true`. SSM parameter `/oecalc/<env>/api-certificate-arn` (`String`, standard tier).
-- **Registry:** `data.aws_ssm_parameters_by_path` reads `/oecalc/<env>/api-backends` recursively. A backend in `var.backends` is active only if both `<backend>/dns-name` and `<backend>/hosted-zone-id` exist; otherwise it is skipped without failing.
-- **Weights guard:** `terraform_data.weights_guard` has a precondition that fails the plan when backends are published and all their weights are 0. The records depend on it.
-- **Records:** `aws_route53_record.api`, type `A`, one per active backend, `set_identifier` = backend name, `weighted_routing_policy.weight`, alias to the published DNS name and zone ID, `evaluate_target_health = false`. Alias records inherit the TTL of their target (the "60 seconds or lower" of the requirement is met by the short TTL of API Gateway and load balancer aliases, not by an explicit value).
-- **Weights:** `api_backends` in each `env.hcl` reads `API_WEIGHT_SLS` and `API_WEIGHT_ECS` (an unset or non-numeric value is 0; validation: integers 0 to 255, names `[a-z0-9-]`). `deploy.yml` fails early when both are empty.
-- **Alarms:** SNS topic `sns-useast2-oecalc-api-alerts-<env>` (policy for `cloudwatch.amazonaws.com` of the account, denies insecure transport, email subscription) and four alarms `alrm-useast2-oecalc-api-cert-expiry-<N>d-<env>` on `AWS/CertificateManager` `DaysToExpiry` (`Minimum`, daily, `LessThanThreshold`, missing data not breaching).
-
-Contract with the backends: SSM parameters `/oecalc/<env>/api-backends/<backend>/dns-name` and `.../hosted-zone-id` (published by the backend), and `/oecalc/<env>/api-certificate-arn` (published here). To add a backend: one entry in `api_backends` (both `env.hcl` files), one `API_WEIGHT_<NAME>` variable in `deploy.yml` and its check.
-
-Known limitation (two-phase first deployment): the record of a backend appears only when this repository is deployed after the backend has published its target. Recorded, undecided option: stable predictable backend targets so records come from configuration, and a path-filtered workflow for DNS and weights that does not rebuild the page.
+The removed Terraform state entries were forgotten with `removed` blocks and `destroy = false`; nothing was deleted in AWS. See [`migrations/README.md`](migrations/README.md).

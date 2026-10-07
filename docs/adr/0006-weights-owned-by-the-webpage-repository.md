@@ -1,6 +1,6 @@
 # 0006. The webpage repository owns the API hostname, its certificate and the traffic weights
 
-Status: accepted (owner decision, 2026-10-05)
+Status: Superseded by ADR 0001 of the repository `over-engineered-simple-calculator-shared-resources` (2026-10-07). The hostname, certificate, weighted records, weights and expiry alarms moved there; this text is kept as history. Originally accepted by the owner on 2026-10-05.
 
 ## Context
 

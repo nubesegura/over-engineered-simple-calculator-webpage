@@ -16,7 +16,7 @@ The address is calculated in `lib/api_address.dart`: `api.` plus the host of the
 
 Each calculation does `POST <Service URL>/<add|sub|mul|div>` with `{"a": <number>, "b": <number>}` and the header `Authorization: Bearer <ID token>`. The page sends the token only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for a local override); any other address is refused and no request is made. The backends validate the token against the Cognito user pool of their environment (see [Login flow](#login-flow)).
 
-Which backend answers is decided in Route 53, not in the page: see [Shared API hostname](#shared-api-hostname).
+Which backend answers is decided in Route 53, not in the page. The API hostname, its certificate and the weights belong to another repository: see [Shared API hostname](#shared-api-hostname).
 
 ### Login flow
 
@@ -53,16 +53,14 @@ src/auth_bff/              BFF Lambda (Python): handler.py, src/auth_bff/, tests
 modules/frontend/          Terraform module: S3, CloudFront (OAC, /auth/* behavior), ACM, Route 53
 modules/auth/              Terraform module: Cognito user pool and app client
 modules/auth-bff/          Terraform module: BFF Lambda, function URL, role, logs, SNS topic, alarms
-modules/api-hostname/      Terraform module: API certificate, weighted records per backend, expiry alarms
 environments/
   root.hcl                 Provider, S3 remote state, naming and mandatory tags
-  common/*.hcl             Shared unit configs (frontend, auth, auth-bff, api-hostname)
+  common/*.hcl             Shared unit configs (frontend, auth, auth-bff)
   dev/env.hcl, prod/env.hcl  Only place where environments differ
   <env>/edge/frontend/     Thin Terragrunt unit
   <env>/edge/auth/         Thin Terragrunt unit
   <env>/edge/auth-bff/     Thin Terragrunt unit
-  <env>/api-hostname/      Thin Terragrunt unit (independent of the edge units)
-docs/                      Architecture, technical and functional docs, ADRs, architecture.drawio
+docs/                      Architecture, technical and functional docs, ADRs, migrations, architecture.drawio
 .github/                   CI, reusable deploy workflow, dev/prod entrypoints
 ```
 
@@ -78,7 +76,7 @@ Per environment (each one deployed to its own AWS account, region `us-east-2`):
 - **ACM certificate** (us-east-1, DNS validated in Route 53) and `A`/`AAAA` alias records.
 - **Certificate expiry alarms** (90, 60, 30 and 15 days) with an SNS email topic, both in us-east-1.
 - **BFF alarms** (Lambda `Errors` and `Throttles`) with their own SNS email topic in us-east-2, see [Alerts](#alerts).
-- **API hostname** (`modules/api-hostname`): regional ACM certificate for `api.<web domain>`, weighted Route 53 records per backend, expiry alarms with a us-east-2 SNS topic, see [Shared API hostname](#shared-api-hostname).
+- **API hostname:** not part of this repository since 2026-10-07 (certificate, weighted records and their alarms), see [Shared API hostname](#shared-api-hostname).
 - **prod only:** the distribution is associated with an existing shared WAF web ACL, see [WAF in prod](#waf-in-prod).
 
 ### Why part of the stack is in us-east-1
@@ -156,30 +154,11 @@ Create both as **GitHub environment variables** with the same names, in the envi
 
 ### Shared API hostname
 
-This repository owns the exposure of the API: the hostname `api.<web domain>` (`api.over-engineered-simple-calculator.dev.nube-segura.com` in dev, `api.over-engineered-simple-calculator.nube-segura.com` in prod), its certificate and which backend receives the traffic ([ADR 0006](docs/adr/0006-weights-owned-by-the-webpage-repository.md)). Backends are interchangeable and answer the neutral path `/api/v1` ([ADR 0007](docs/adr/0007-neutral-api-path.md)).
+Since 2026-10-07 the exposure of the API belongs to the repository `over-engineered-simple-calculator-shared-resources`: the hostname `api.<web domain>`, its regional certificate (published in SSM at `/oecalc/<env>/api-certificate-arn`), the weighted Route 53 records, the weights (GitHub variables `API_WEIGHT_*` of that repository) and the certificate expiry alarms with their SNS topic. Its documentation is the reference for the contract with the backends and for changing weights. This repository no longer creates, reads or needs any of them.
 
-**What `modules/api-hostname` creates (per environment):**
+This repository forgot those resources with Terraform `removed` blocks (`destroy = false`) after the new owner imported them; nothing was deleted in AWS. See [`docs/migrations/`](docs/migrations/README.md). The decision of this repository owning them ([ADR 0006](docs/adr/0006-weights-owned-by-the-webpage-repository.md)) is superseded. Backends answer the neutral path `/api/v1` ([ADR 0007](docs/adr/0007-neutral-api-path.md)).
 
-- A regional ACM certificate (us-east-2, RSA 2048, DNS validated in the environment's hosted zone) for the API hostname. The validation record is written with `allow_overwrite`, because it may already exist from the sls repository. Its ARN is published in SSM at `/oecalc/<env>/api-certificate-arn` (standard `String`).
-- Expiry alarms at 90, 60, 30 and 15 days with their own SNS email topic in us-east-2 (`SUPPORT_EMAIL`). Confirm the subscription from the inbox after the first apply.
-- One weighted `A` alias record per registered backend, with the backend name as set identifier. Alias records inherit the TTL of their target.
-
-**Contract with the backends.** Each backend repository publishes, in the same account and region, two SSM parameters:
-
-```
-/oecalc/<env>/api-backends/<backend>/dns-name
-/oecalc/<env>/api-backends/<backend>/hosted-zone-id
-```
-
-and reads the certificate ARN from `/oecalc/<env>/api-certificate-arn` to attach it to its own custom domain. The registered backends are `sls` and `ecs`.
-
-**Weights.** The GitHub environment variables `API_WEIGHT_SLS` and `API_WEIGHT_ECS` (integers 0 to 255) set the weight of each backend; an unset or non-numeric value counts as 0. The deploy refuses to run when both are empty, and the plan fails when every published backend has weight 0, so the hostname is never left without an answer. Current setting: **dev** `API_WEIGHT_SLS=0`, `API_WEIGHT_ECS=100` (owner decision 2026-10-06); prod is handled by the owner. To move traffic, change the two variables and redeploy this repository; to go back, change them again.
-
-**Add a backend:** one entry in `api_backends` of `environments/<env>/env.hcl`, one variable `API_WEIGHT_<NAME>` in `deploy.yml` (plus the all-empty check), and the backend publishes its two parameters.
-
-**Known limitation: two-phase first deployment.** A backend's record exists only when its two SSM parameters exist at plan time (an unpublished backend is skipped without failing). The first time, deploy the backend (it publishes its target), then deploy this repository again to create its record. Removing this dependency is a recorded option, not decided: give each backend a stable, predictable target so the records are built from configuration instead of SSM discovery, and move DNS and weights to their own path-filtered workflow so changing weights does not rebuild or redeploy the page.
-
-**Handover of an existing simple record** (the sls record that predates the weighted ones): in prod the owner runs one atomic Route 53 change (delete the simple record and create the weighted one together) and this repository then takes it over; the order is defined in the companion sls spec.
+What stays here for the API: the page calculates the read-only Service URL (`https://api.<host of the page>/api/v1`) and sends the ID token to it; Cognito and the BFF issue the token. Changing weights never rebuilds or redeploys the page.
 
 ### Run Terragrunt by hand
 
@@ -191,7 +170,7 @@ terragrunt run --all plan
 terragrunt run --all apply
 ```
 
-`run --all` orders the units by their dependencies: `edge/auth`, then `edge/auth-bff`, then `edge/frontend`. The `api-hostname` unit has no dependency on them. Export `API_WEIGHT_SLS` and `API_WEIGHT_ECS` as well (or put them in `environments/<env>/secrets.yml`); with both at 0 and a published backend the plan fails on purpose.
+`run --all` orders the units by their dependencies: `edge/auth`, then `edge/auth-bff`, then `edge/frontend`.
 
 ### Publish the app by hand
 
@@ -213,16 +192,15 @@ aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths 
 1. **This repository first**: deploy `dev` (push to `develop`) or `prod` (push to `main`). The workflow creates the pool, the BFF and the distribution, publishes the page and prints the two Cognito values.
 2. Confirm the SNS email subscriptions, and create the user(s) with a permanent password.
 3. **Then the variables**: create `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID` in the matching GitHub environment of each backend repository.
-4. **Then the backend** repositories, which validate tokens with that pool and publish their target in SSM.
-5. **Deploy this repository once more** so the weighted record of each newly published backend is created (see the two-phase limitation in [Shared API hostname](#shared-api-hostname)).
+4. **Then the backend** repositories, which validate tokens with that pool. Their record under `api.<web domain>` is created from the shared-resources repository (see [Shared API hostname](#shared-api-hostname)); this repository is not deployed again for it.
 
 ## CI/CD (gitflow)
 
-- `ci.yml` (pull requests to `develop` / `main`, reused by the deploys): Flutter job (`flutter analyze`, `flutter test`, `flutter build web --no-web-resources-cdn`), BFF job (installs the fully pinned `requirements-dev.txt`, `pip-audit`, `ruff check`, `ruff format --check`, `mypy`, `lint-imports`, `pytest` with at least 85% coverage), IaC job (`terraform fmt`, `terragrunt hcl fmt`, mandatory tags and remote state checks) and a Terraform job (`terraform validate` of each module, including `api-hostname`, without credentials).
+- `ci.yml` (pull requests to `develop` / `main`, reused by the deploys): Flutter job (`flutter analyze`, `flutter test`, `flutter build web --no-web-resources-cdn`), BFF job (installs the fully pinned `requirements-dev.txt`, `pip-audit`, `ruff check`, `ruff format --check`, `mypy`, `lint-imports`, `pytest` with at least 85% coverage), IaC job (`terraform fmt`, `terragrunt hcl fmt`, mandatory tags and remote state checks) and a Terraform job (`terraform validate` of each module, without credentials).
 - Dependabot (weekly) covers `pub`, `pip` (`/src/auth_bff`), GitHub Actions and Terraform.
 - `deploy-dev.yml` (push to `develop`) and `deploy-prod.yml` (push to `main`) run CI and then `deploy.yml`: configuration check, OIDC login, account check, `terragrunt run --all plan/apply`, the Cognito hand-off summary, Flutter build, `s3 sync`, CloudFront invalidation, a smoke test of the public URL and a smoke test of the BFF (`POST /auth/refresh` without a cookie must answer 401 with a JSON body).
 
-Each GitHub environment (`dev`, `prod`) needs the secrets `ROLE_ARN`, `AWS_ACCOUNT_ID` and `SUPPORT_EMAIL` (alert address) and the variables `AWS_REGION` and `ROUTE53_ZONE_ID`, and at least one of `API_WEIGHT_SLS` and `API_WEIGHT_ECS`. The `prod` environment also needs the variable `WAF_WEB_ACL_ARN`, and should require reviewers so the apply waits for a manual approval.
+Each GitHub environment (`dev`, `prod`) needs the secrets `ROLE_ARN`, `AWS_ACCOUNT_ID` and `SUPPORT_EMAIL` (alert address) and the variables `AWS_REGION` and `ROUTE53_ZONE_ID`. The `prod` environment also needs the variable `WAF_WEB_ACL_ARN`, and should require reviewers so the apply waits for a manual approval.
 
 ## Gitflow and first deployment
 
@@ -239,7 +217,6 @@ Each GitHub environment needs:
 | Secret | `SUPPORT_EMAIL` | Address of the alert subscriptions |
 | Variable | `AWS_REGION` | Must match `aws_region` in `env.hcl` (`us-east-2`) |
 | Variable | `ROUTE53_ZONE_ID` | Hosted zone of that account |
-| Variable | `API_WEIGHT_SLS`, `API_WEIGHT_ECS` | Routing weights 0-255 of each backend behind `api.<web domain>`; at least one must be set, and one above 0 once a backend has published its target |
 | Variable | `API_BASE_URL` | Optional: build-time override of the Service URL label (empty = calculated address) |
 | Variable | `WAF_WEB_ACL_ARN` | **prod only**: existing CloudFront-scope web ACL in us-east-1 |
 
@@ -253,9 +230,8 @@ The OIDC deployment role needs permissions for the services below (a checklist; 
 - [ ] CloudWatch (log group and alarms)
 - [ ] CloudFront (distribution, origin access controls, response headers policy)
 - [ ] S3 (the web bucket and the Terraform state)
-- [ ] ACM (certificates in us-east-1 and, for the API hostname, in us-east-2)
-- [ ] Route 53 (records in the environment's zone, including the weighted API records)
-- [ ] SSM (read the backend target parameters, write the certificate ARN parameter)
+- [ ] ACM (the certificate in us-east-1)
+- [ ] Route 53 (records in the environment's zone)
 
 After the first deployment of an environment follow [Deployment order](#deployment-order): confirm the SNS subscriptions, create the users and hand the two Cognito values to the backends.
 

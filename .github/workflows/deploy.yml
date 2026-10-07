@@ -37,10 +37,6 @@ jobs:
       ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
       SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
       WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
-      # Routing weights (0-255) of the backends behind api.<web domain>, read by env.hcl.
-      # An unset variable counts as 0.
-      API_WEIGHT_SLS: ${{ vars.API_WEIGHT_SLS }}
-      API_WEIGHT_ECS: ${{ vars.API_WEIGHT_ECS }}
       TG_NON_INTERACTIVE: "true"
     steps:
       - name: Checkout Repository
@@ -87,11 +83,6 @@ jobs:
           # prod must be behind an existing web ACL (created outside this repository).
           if [ "$TARGET" = "prod" ] && [ -z "$WAF_WEB_ACL_ARN" ]; then
             echo "::error::Variable 'WAF_WEB_ACL_ARN' is not set in the 'prod' GitHub environment (ARN of an existing WAFv2 web ACL, CloudFront scope, us-east-1)"
-            missing=1
-          fi
-          # At least one backend weight must be set (the module refuses all-zero weights).
-          if [ -z "$API_WEIGHT_SLS" ] && [ -z "$API_WEIGHT_ECS" ]; then
-            echo "::error::Set at least one of the variables 'API_WEIGHT_SLS' or 'API_WEIGHT_ECS' in the '$TARGET' GitHub environment"
             missing=1
           fi
           [ "$missing" -eq 0 ] || exit 1

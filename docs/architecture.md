@@ -8,7 +8,7 @@ Diagram: [`architecture.drawio`](architecture.drawio) (exported as `architecture
 
 The BFF (backend for frontend) is **an AWS Lambda function deployed by this repository** (`modules/auth-bff`, code in `src/auth_bff`). It runs **behind the page's CloudFront distribution**: CloudFront routes `/auth/*` to the function's function URL and everything else to the S3 bucket. It is **not code running inside CloudFront** (not a CloudFront Function and not Lambda@Edge).
 
-Its only job is the session: login, refresh and logout against Amazon Cognito, keeping the long-lived refresh token in an `HttpOnly` cookie. It authenticates to Cognito as a confidential app client: the client secret lives in an SSM SecureString parameter and the BFF reads it once at cold start (see [ADR 0004](adr/0004-confidential-app-client.md)). It is not a proxy: the page calls the chosen backend (sls, ecs, ...) directly with a bearer token, so the page stays shared between backends. Which backend answers is decided in Route 53 by the weighted records of the shared API hostname, owned by this repository (see [Shared API hostname](#shared-api-hostname)).
+Its only job is the session: login, refresh and logout against Amazon Cognito, keeping the long-lived refresh token in an `HttpOnly` cookie. It authenticates to Cognito as a confidential app client: the client secret lives in an SSM SecureString parameter and the BFF reads it once at cold start (see [ADR 0004](adr/0004-confidential-app-client.md)). It is not a proxy: the page calls the chosen backend (sls, ecs, ...) directly with a bearer token, so the page stays shared between backends. Which backend answers is decided in Route 53 by the weighted records of the shared API hostname, owned by the repository `over-engineered-simple-calculator-shared-resources` (see [Shared API hostname](#shared-api-hostname)).
 
 ## Components
 
@@ -21,9 +21,8 @@ Its only job is the session: login, refresh and logout against Amazon Cognito, k
 | Cognito user pool + confidential app client | this repo, us-east-2 | Local users created by the owner. Issues the tokens. The client has a secret, so only the BFF can sign in, renew or revoke. |
 | SSM parameter (SecureString) | this repo, us-east-2 | Holds the app client secret (`/<context>/<env>/auth/app-client-secret`, standard tier, AWS managed key). Read by the BFF role only. |
 | CloudWatch logs and alarms | us-east-2 | One JSON line per request; alarms on Errors and Throttles notify a dedicated SNS topic (us-east-2, email). |
-| API certificate | this repo (`modules/api-hostname`), us-east-2 | Regional ACM certificate for `api.<web domain>`, DNS validated; ARN published in SSM `/oecalc/<env>/api-certificate-arn` for the backends. Expiry alarms with a us-east-2 SNS topic. |
-| Weighted API records | this repo, Route 53 | One weighted `A` alias per backend that has published its target; weights from `API_WEIGHT_SLS` and `API_WEIGHT_ECS`. |
-| Backends (sls, ecs, ...) | other repositories | Publish their target in SSM (`/oecalc/<env>/api-backends/<backend>/...`); answer the neutral path `/api/v1`. Validate the ID token with the pool of their environment (`COGNITO_USER_POOL_ID`, `COGNITO_APP_CLIENT_ID`). |
+| API hostname, certificate and weighted records | `over-engineered-simple-calculator-shared-resources` (not this repo) | `api.<web domain>`, its regional certificate, the weighted records and their expiry alarms. Moved there on 2026-10-07. |
+| Backends (sls, ecs, ...) | other repositories | Answer the neutral path `/api/v1` on that hostname. Validate the ID token with the pool of their environment (`COGNITO_USER_POOL_ID`, `COGNITO_APP_CLIENT_ID`). |
 
 ## Trust boundaries
 
@@ -74,7 +73,7 @@ sequenceDiagram
     Note over P: ID and access token kept in memory only
 
     Note over P,API: Use
-    P->>API: calculation or history at api.<site>/api/v1 with Authorization Bearer ID token (Route 53 weights pick sls or ecs)
+    P->>API: calculation or history at api.<site>/api/v1 with Authorization Bearer ID token (the weights in Route 53, owned by shared-resources, pick sls or ecs)
 
     Note over P,B: Refresh (page start, or ID token expires in less than 60 s, or backend 401)
     P->>CF: POST /auth/refresh (browser adds the cookie)
@@ -109,7 +108,7 @@ All differences are in `environments/<env>/env.hcl`; the Terragrunt units are id
 
 ## Resource inventory
 
-One row per resource (or group) created or changed by this repository. Name pattern: `<acronym>-<region>-<context>[-<descriptor>]-<env>` with `<region>` written without hyphens (`useast2`), `<context>` = `oecalc` and `<env>` = `dev` or `prod`. `<account-id>` is the AWS account of the environment. Status: **new** = added by spec 001-cognito-auth-bff or, where marked, by spec 002-ecs-backend-cutover; **changed** = existed before and was modified; **kept** = pre-existing and unchanged by the spec. Every resource carries the mandatory tags from `environments/root.hcl` (`team-owner`, `project-name`, `app-name`, `repo-name`, `env-type`).
+One row per resource (or group) created or changed by this repository. Name pattern: `<acronym>-<region>-<context>[-<descriptor>]-<env>` with `<region>` written without hyphens (`useast2`), `<context>` = `oecalc` and `<env>` = `dev` or `prod`. `<account-id>` is the AWS account of the environment. Status: **new** = added by spec 001-cognito-auth-bff; **changed** = existed before and was modified; **kept** = pre-existing and unchanged by the spec. Every resource carries the mandatory tags from `environments/root.hcl` (`team-owner`, `project-name`, `app-name`, `repo-name`, `env-type`).
 
 | Resource | IaC type | Real name (pattern) | Purpose | Env / dev vs prod | Status / cost note |
 |---|---|---|---|---|---|
@@ -133,16 +132,9 @@ One row per resource (or group) created or changed by this repository. Name patt
 | ACM certificate and validation | `aws_acm_certificate`, `aws_acm_certificate_validation` (us-east-1) | Name tag `acm-useast2-oecalc-web-<env>` | TLS for the custom domain, DNS validated, RSA 2048 | dev and prod, domain differs | kept |
 | Route 53 records | `aws_route53_record` (validation CNAME, `A` and `AAAA` alias) | the environment's domain name, in the hosted zone `<route53-zone-id>` of the account | DNS to CloudFront | dev and prod, domain differs | kept |
 | Web alert topic and certificate alarms | `aws_sns_topic`, policy, email subscription, `aws_cloudwatch_metric_alarm` x4 (us-east-1) | `sns-useast1-oecalc-web-alerts-<env>`, `alrm-useast1-oecalc-web-cert-expiry-<N>d-<env>` with N = 90, 60, 30, 15 (four alarms) | Certificate expiry (ACM metric exists only in us-east-1) | dev and prod, same | kept |
-| API certificate | `aws_acm_certificate` (us-east-2) | Name tag `acm-useast2-oecalc-api-<env>`; domain `api.<web domain>` | Regional TLS certificate of the shared API hostname, RSA 2048, DNS validated, `create_before_destroy` | dev and prod, domain differs | new (002); free |
-| API certificate validation | `aws_route53_record` (CNAME, `allow_overwrite`), `aws_acm_certificate_validation` | validation name generated by ACM, in the environment's hosted zone | Validates the API certificate; the record may already exist (written before by the sls repository) and must not be deleted while another certificate uses it | dev and prod, same | new (002) |
-| API certificate ARN parameter | `aws_ssm_parameter` (`String`, standard) | `/oecalc/<env>/api-certificate-arn`; Name tag `ssm-useast2-oecalc-api-certificate-arn-<env>` | Contract: backends read the ARN to attach the certificate to their custom domain | dev and prod, same | new (002); no charge |
-| Weighted API records | `aws_route53_record` (`A` alias, weighted, `for_each` over published backends) | `api.<web domain>`, set identifier `sls` or `ecs` | Route traffic by weight; target read from `/oecalc/<env>/api-backends/<backend>/{dns-name,hosted-zone-id}`; a backend that has not published is skipped | weights from `API_WEIGHT_SLS` and `API_WEIGHT_ECS`; dev currently sls 0, ecs 100 | new (002); alias queries to AWS targets are not charged, hosted zone unchanged |
-| Weights guard | `terraform_data` with a precondition | `weights_guard` (no cloud resource) | Fails the plan when every published backend has weight 0 | dev and prod, same | new (002) |
-| API alert topic | `aws_sns_topic`, policy, email subscription (us-east-2) | `sns-useast2-oecalc-api-alerts-<env>` | Notifies the certificate expiry alarms; policy allows `cloudwatch.amazonaws.com` of this account and denies insecure transport | dev and prod, same | new (002); AWS managed encryption only (same as G8) |
-| API certificate expiry alarms | `aws_cloudwatch_metric_alarm` x4 | `alrm-useast2-oecalc-api-cert-expiry-<N>d-<env>`, N = 90, 60, 30, 15 | `DaysToExpiry` below N days (certificate moved here from sls with its monitoring) | dev and prod, same | new (002); standard alarm price each |
-| Terraform state | S3 bucket `bckt-useast2-tf-state-<env>-<account-id>` (outside this repository) | one state file per unit, key `over-engineered-simple-calculator-webpage/<env>/<unit path>/terraform.tfstate` (`edge/auth`, `edge/auth-bff`, `edge/frontend`, `api-hostname`) | Remote state with native locking; also holds the client secret in clear text (gap G10) | dev and prod | kept |
+| Terraform state | S3 bucket `bckt-useast2-tf-state-<env>-<account-id>` (outside this repository) | one state file per unit, key `over-engineered-simple-calculator-webpage/<env>/<unit path>/terraform.tfstate` (`edge/auth`, `edge/auth-bff`, `edge/frontend`) | Remote state with native locking; also holds the client secret in clear text (gap G10) | dev and prod | kept |
 
-Removed: no Terraform resource was removed by specs 001 or 002. In the page, the API key field and header were replaced by the Cognito login (001) and the editable Service URL field by a read-only label (002).
+Removed from the state of this repository (spec 003-move-api-edge-out, not deleted in AWS; now owned by `over-engineered-simple-calculator-shared-resources`): the API certificate and its validation, the SSM parameter `/oecalc/<env>/api-certificate-arn`, the weighted API records, the weights guard, the API alert topic (policy and subscription) and the four API certificate expiry alarms. The pattern is in [`migrations/`](migrations/README.md). In the page, the API key field and header were replaced by the Cognito login (001) and the editable Service URL field by a read-only label (002).
 
 ### Known gaps in the inventory
 
@@ -153,13 +145,13 @@ Removed: no Terraform resource was removed by specs 001 or 002. In the page, the
 
 ## Deployment units
 
-`environments/<env>/edge/auth` (Cognito) -> `edge/auth-bff` (Lambda, alarms; needs the app client ID) -> `edge/frontend` (S3, CloudFront, certificate, DNS; needs the function name and URL host). Terragrunt orders them by dependency. `environments/<env>/api-hostname` (API certificate, weighted records, alarms) depends on none of them. The Lambda permission for CloudFront lives in `modules/frontend` because it needs the distribution ARN.
+`environments/<env>/edge/auth` (Cognito) -> `edge/auth-bff` (Lambda, alarms; needs the app client ID) -> `edge/frontend` (S3, CloudFront, certificate, DNS; needs the function name and URL host). Terragrunt orders them by dependency. The Lambda permission for CloudFront lives in `modules/frontend` because it needs the distribution ARN.
 
 ## Shared API hostname
 
-`api.<web domain>` (for example `api.over-engineered-simple-calculator.dev.nube-segura.com` in dev) is owned by this repository ([ADR 0006](adr/0006-weights-owned-by-the-webpage-repository.md)). It resolves through weighted alias records, one per backend (`sls`, `ecs`, later others), to the load balancer or API Gateway domain that the backend publishes in SSM. All backends answer `/api/v1` ([ADR 0007](adr/0007-neutral-api-path.md)) and use the shared regional certificate whose ARN is in `/oecalc/<env>/api-certificate-arn`. Changing the GitHub variables `API_WEIGHT_SLS` and `API_WEIGHT_ECS` and redeploying this repository moves traffic; neither the page nor the backends change. dev currently sends all traffic to ecs (sls 0, ecs 100).
+`api.<web domain>` (for example `api.over-engineered-simple-calculator.dev.nube-segura.com` in dev) is **not owned by this repository any more**. Since 2026-10-07 the repository `over-engineered-simple-calculator-shared-resources` owns the hostname, its regional certificate (ARN in SSM `/oecalc/<env>/api-certificate-arn`), the weighted alias records, the weights and the certificate expiry alarms, and supersedes [ADR 0006](adr/0006-weights-owned-by-the-webpage-repository.md). All backends answer `/api/v1` ([ADR 0007](adr/0007-neutral-api-path.md)). A backend's record is created from shared-resources and changing weights never rebuilds the page.
 
-The module refuses to plan when every published backend has weight 0. **Known limitation:** a backend's record appears only when this repository is deployed after the backend has published its SSM target (two-phase first deployment). A recorded, undecided option removes it with stable predictable targets and a separate path-filtered workflow for DNS and weights.
+What stays here: the page computes the read-only Service URL from its own host and sends the ID token to it; Cognito and the BFF issue the token. This repository forgot the moved resources with `removed` blocks (`destroy = false`), see [migrations](migrations/README.md).
 
 ## Error handling in the BFF
 
@@ -175,4 +167,4 @@ These items are built but have not been checked against a deployed environment:
 - the `boto3` version of the Lambda runtime (it must include `get_tokens_from_refresh_token`; otherwise boto3 must be packaged);
 - whether the Cognito console can mark a new user's password as permanent;
 - that Cognito refuses a direct `InitiateAuth` for the client without the secret hash (task 6.6).
-- the shared API hostname in a deployed environment (certificate issued, weighted records, handover of the existing sls record); verification of `dev` is tracked in the spec, not confirmed here.
+- that the first deployment of each environment after spec 003 shows no changes for the moved resources (the `removed` blocks were applied only after shared-resources adopted them); tracked in the spec, not confirmed here.
