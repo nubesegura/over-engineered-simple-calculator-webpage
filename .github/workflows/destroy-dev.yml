@@ -1,0 +1,150 @@
+name: Destroy DEV
+
+# Manual teardown of the dev environment of this repository. There are no approvers (single-user
+# organization), so the safety is inside the workflow:
+#   1. mode "plan" is the default: it only shows what would be destroyed, nothing is touched;
+#   2. mode "destroy" needs the repository name typed in "confirm";
+#   3. it runs only from develop (the dev branch) with the dev GitHub environment and the dev AWS account;
+#   4. there is no destroy workflow for prod.
+# Terragrunt destroys the units in reverse dependency order. Teardown order across the repositories:
+# backends (ecs, sls), then the web page, then shared-resources (certificate and DNS of the API).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = show what would be destroyed (default); destroy = destroy it"
+        type: choice
+        options:
+          - plan
+          - destroy
+        default: plan
+      confirm:
+        description: "Only for mode destroy: type the name of this repository"
+        type: string
+        required: false
+
+permissions:
+  id-token: write # Required for requesting the JWT for AWS OIDC
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.16.2"
+  TERRAGRUNT_VERSION: "1.1.5"
+
+jobs:
+  destroy:
+    name: Destroy dev
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 120
+    # Never run a destroy and a deployment against the same state at once (same group as deploy.yml).
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: environments/dev
+    env:
+      # Read by env.hcl.
+      ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
+      SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+      WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+      TG_NON_INTERACTIVE: "true"
+      TF_CLI_ARGS_plan: "-no-color"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate the request
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
+            echo "::error::Only the develop branch can destroy the dev environment (got $GITHUB_REF)"
+            exit 1
+          fi
+          if [ "$MODE" = "destroy" ] && [ "$CONFIRM" != "$REPO_NAME" ]; then
+            echo "::error::To destroy, type the repository name ($REPO_NAME) in the 'confirm' input"
+            exit 1
+          fi
+          echo "Mode: $MODE"
+
+      - name: Validate environment configuration
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ROLE_ARN_SET: ${{ secrets.ROLE_ARN != '' }}
+          AWS_ACCOUNT_ID_SET: ${{ secrets.AWS_ACCOUNT_ID != '' }}
+        run: |
+          missing=0
+          [ -n "$AWS_REGION" ] || { echo "::error::Variable 'AWS_REGION' is not set in the 'dev' GitHub environment"; missing=1; }
+          for secret in ROLE_ARN AWS_ACCOUNT_ID; do
+            flag="${secret}_SET"
+            [ "${!flag}" = "true" ] || { echo "::error::Secret '$secret' is not set in the 'dev' GitHub environment"; missing=1; }
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          if ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" env.hcl; then
+            echo "::error::AWS_REGION does not match aws_region in environments/dev/env.hcl"
+            exit 1
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.ROLE_ARN }}
+          role-session-name: gha-destroy-dev-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify target AWS account
+        env:
+          EXPECTED_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          ACTUAL_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACTUAL_ACCOUNT"
+          if [ "$ACTUAL_ACCOUNT" != "$EXPECTED_ACCOUNT" ]; then
+            echo "::error::The credentials do not point to the AWS account configured for the dev GitHub environment"
+            exit 1
+          fi
+
+      - name: Setup IaC Tooling
+        uses: ./.github/actions/setup-iac
+        with:
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
+
+      # Informational: the user pool holds the users of the page; destroying it deletes them.
+      - name: Show the number of users that would be deleted
+        continue-on-error: true
+        run: |
+          POOL=$(aws cognito-idp list-user-pools --max-results 20 --query "UserPools[?contains(Name,'oecalc')].Id|[0]" --output text)
+          if [ -n "$POOL" ] && [ "$POOL" != "None" ]; then
+            USERS=$(aws cognito-idp describe-user-pool --user-pool-id "$POOL" --query 'UserPool.EstimatedNumberOfUsers' --output text)
+            echo "::notice::The dev user pool has about $USERS user(s); destroying the environment deletes them"
+          fi
+
+      - name: Plan the destruction
+        run: |
+          set -o pipefail
+          terragrunt run --all -- plan -destroy -lock-timeout=300s 2>&1 | tee "$RUNNER_TEMP/destroy-plan.txt"
+
+      - name: Summary of what would be destroyed
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          {
+            echo "### Destroy DEV (mode: $MODE)"
+            echo ""
+            echo "Plan lines per unit:"
+            grep -E "Plan: [0-9]+ to add" "$RUNNER_TEMP/destroy-plan.txt" | sed -E 's/^[0-9:. ]*(STDOUT|STDERR) //' || echo "(no resources in the state)"
+            echo ""
+            echo "Resources that will be destroyed (first 150):"
+            grep -E "# .* will be destroyed" "$RUNNER_TEMP/destroy-plan.txt" | sed -E 's/^[0-9:. ]*(STDOUT|STDERR) //' | head -150 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" != "destroy" ]; then
+            echo "Nothing was destroyed. To destroy, run this workflow again with mode destroy and the repository name in confirm."
+          fi
+
+      - name: Destroy
+        if: ${{ inputs.mode == 'destroy' }}
+        run: terragrunt run --all -- destroy -auto-approve -lock-timeout=300s

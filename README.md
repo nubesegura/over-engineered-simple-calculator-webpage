@@ -274,3 +274,15 @@ Other facts: the cookie is `HttpOnly`, `Secure`, `SameSite=Strict`, path `/auth`
 ## Migrating from the ECS repository
 
 The frontend used to live in `over-engineered-simple-calculator-aws-ecs-version` with its own S3/CloudFront stack on the same prod domain. That stack was already destroyed and its definition removed from the ECS repository, so nothing blocks the first deploy of this one.
+
+## Destroying the dev environment
+
+The manual workflow **Destroy DEV** (`.github/workflows/destroy-dev.yml`) tears down this repository's `dev` environment. There are no approvers (single-user organization), so the safety is inside the workflow:
+
+1. Run it from the `develop` branch (Actions, Destroy DEV, Run workflow). The default mode is **plan**: it lists what would be destroyed and touches nothing.
+2. Read the summary of the run. To destroy, run it again with mode **destroy** and type the name of this repository in `confirm`.
+3. It uses the `dev` GitHub environment and the dev AWS account only; the account is verified before anything runs. There is no destroy workflow for `prod`.
+
+Teardown order across the repositories: the backends (`ecs`, `sls`) first, then the web page (`webpage`), then `shared-resources` (certificate and DNS of the API). The Terraform state bucket and the GitHub variables and secrets are not removed.
+
+Notes: the user pool is deleted with its users (the run prints how many as a notice before planning); CloudFront takes several minutes to delete.
