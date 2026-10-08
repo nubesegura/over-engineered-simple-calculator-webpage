@@ -233,6 +233,10 @@ Dependabot (`.github/dependabot.yml`, weekly): `pub` (`/src/calculator_app`), `p
 
 `lib/api_client.dart` sends `Authorization: Bearer <ID token>` only when the address is trusted: scheme `https` with a host, or `http` to `localhost` or `127.0.0.1` for local runs (overrides). For any other URL the page shows "The API address must use https." (calculation and history) and makes no request that carries the token.
 
+## Page: backend name and response time
+
+`lib/api_client.dart`: `calculate()` returns a `CalculationResult` with `result` and an optional `backend` string (kept only when the JSON field is a string; any other type is ignored). `lib/main.dart` shows `Backend: <value>` and `Response time: <n> ms` under the result. The time comes from a `Stopwatch` started right after validation when Calculate is pressed and stopped in a `WidgetsBinding.instance.addPostFrameCallback` after the frame that shows the result, so it includes the network call and the rendering. The stopwatch is injectable (`stopwatchFactory`) for tests; a generation counter drops a late measurement when the page was reset meanwhile. The page has no list of backend names and no logic that depends on the value.
+
 ## Shared API hostname (owned elsewhere)
 
 Since 2026-10-07 the API certificate, the SSM parameter `/oecalc/<env>/api-certificate-arn`, the weighted Route 53 records, the weights and the certificate expiry alarms with their SNS topic belong to the repository `over-engineered-simple-calculator-shared-resources` (its documentation describes the module, the weights and the contract with the backends). This repository has no `api-hostname` module or unit and no `API_WEIGHT_*` variables. [ADR 0006](adr/0006-weights-owned-by-the-webpage-repository.md) is superseded; [ADR 0007](adr/0007-neutral-api-path.md) (neutral path `/api/v1`) still applies.

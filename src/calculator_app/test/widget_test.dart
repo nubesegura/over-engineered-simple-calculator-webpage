@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:calculator_app/auth/auth_api.dart';
@@ -33,13 +34,35 @@ class SignedInAuthApi implements AuthApi {
 
 const _address = 'https://api.calc.example.test/api/v1';
 
+/// A stopwatch whose elapsed time is fixed by the test.
+class FakeStopwatch extends Fake implements Stopwatch {
+  FakeStopwatch(this.elapsed);
+
+  @override
+  final Duration elapsed;
+  bool started = false;
+  bool stopped = false;
+
+  @override
+  void start() => started = true;
+
+  @override
+  void stop() => stopped = true;
+
+  @override
+  int get elapsedMilliseconds => elapsed.inMilliseconds;
+}
+
 Future<void> _pumpCalculator(WidgetTester tester,
-    {http.Client? backend, String apiBaseUrl = _address}) async {
+    {http.Client? backend,
+    String apiBaseUrl = _address,
+    Stopwatch Function()? stopwatchFactory}) async {
   await tester.pumpWidget(CalculatorApp(
     httpClient: backend,
     loginSupported: true,
     apiBaseUrl: apiBaseUrl,
     session: SessionController(SignedInAuthApi()),
+    stopwatchFactory: stopwatchFactory,
   ));
   await tester.pumpAndSettle();
 }
@@ -236,6 +259,120 @@ void main() {
       expect(find.byKey(const Key('login-email-field')), findsOneWidget);
       expect(find.text('Your session has expired. Please log in again.'),
           findsOneWidget);
+    });
+
+    group('backend and response time', () {
+      late FakeStopwatch stopwatch;
+
+      Future<void> pumpWith(WidgetTester tester, Map<String, Object?> body,
+          {int status = 200}) async {
+        stopwatch = FakeStopwatch(const Duration(milliseconds: 42));
+        await _pumpCalculator(
+          tester,
+          backend: MockClient((_) async => _json(body, status)),
+          stopwatchFactory: () => stopwatch,
+        );
+      }
+
+      testWidgets('shows the backend as received and the time after the result',
+          (tester) async {
+        await pumpWith(tester, {'result': '5', 'backend': 'sls'});
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.textContaining('Response time:'), findsNothing);
+
+        await _calculate(tester);
+
+        expect(find.text('Result: 5'), findsOneWidget);
+        expect(find.text('Backend: sls'), findsOneWidget);
+        expect(find.text('Response time: 42 ms'), findsOneWidget);
+        expect(stopwatch.started, isTrue);
+        expect(stopwatch.stopped, isTrue);
+      });
+
+      testWidgets('shows any string value without interpreting it',
+          (tester) async {
+        await pumpWith(tester, {'result': '5', 'backend': 'Some-New_1'});
+        await _calculate(tester);
+        expect(find.text('Backend: Some-New_1'), findsOneWidget);
+      });
+
+      testWidgets('hides the backend line when the field is missing or wrong',
+          (tester) async {
+        await pumpWith(tester, {'result': '5', 'backend': 3});
+        await _calculate(tester);
+
+        expect(find.text('Result: 5'), findsOneWidget);
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.text('Response time: 42 ms'), findsOneWidget);
+      });
+
+      testWidgets('shows no time and no backend when the call fails',
+          (tester) async {
+        await pumpWith(
+          tester,
+          {
+            'error': {'code': 'FORBIDDEN', 'message': 'Not allowed.'},
+            'backend': 'sls',
+          },
+          status: 403,
+        );
+        await _calculate(tester);
+
+        expect(find.text('Result: Error: Not allowed.'), findsOneWidget);
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.textContaining('Response time:'), findsNothing);
+      });
+
+      testWidgets('both lines are hidden when the fields change or an '
+          'operation is picked', (tester) async {
+        await pumpWith(tester, {'result': '5', 'backend': 'ecs'});
+        await _calculate(tester);
+        expect(find.text('Backend: ecs'), findsOneWidget);
+
+        await tester.enterText(
+            find.byKey(const Key('first-number-field')), '');
+        await tester.pump();
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.textContaining('Response time:'), findsNothing);
+
+        await _calculate(tester);
+        expect(find.text('Backend: ecs'), findsOneWidget);
+        await tester.tap(find.text('-'));
+        await tester.pump();
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.textContaining('Response time:'), findsNothing);
+      });
+
+      testWidgets('both lines are hidden while a new calculation runs',
+          (tester) async {
+        stopwatch = FakeStopwatch(const Duration(milliseconds: 42));
+        final pending = Completer<http.Response>();
+        var first = true;
+        await _pumpCalculator(
+          tester,
+          backend: MockClient((_) {
+            if (first) {
+              first = false;
+              return Future.value(_json({'result': '5', 'backend': 'sls'}));
+            }
+            return pending.future;
+          }),
+          stopwatchFactory: () => stopwatch,
+        );
+        await _calculate(tester);
+        expect(find.text('Backend: sls'), findsOneWidget);
+
+        await tester.tap(find.text('Calculate'));
+        await tester.pump();
+
+        expect(find.text('Result: Calculating...'), findsOneWidget);
+        expect(find.textContaining('Backend:'), findsNothing);
+        expect(find.textContaining('Response time:'), findsNothing);
+
+        pending.complete(_json({'result': '6', 'backend': 'ecs'}));
+        await tester.pumpAndSettle();
+        expect(find.text('Backend: ecs'), findsOneWidget);
+      });
     });
 
     testWidgets('a 403 keeps the calculator and shows the error',

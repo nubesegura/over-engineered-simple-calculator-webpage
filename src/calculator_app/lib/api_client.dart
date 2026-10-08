@@ -21,6 +21,17 @@ class ApiException implements Exception {
 /// Shown instead of sending the bearer token to an untrusted API address.
 const String untrustedUrlMessage = 'The API address must use https.';
 
+/// The answer of `POST <service url>/<operation>`.
+class CalculationResult {
+  const CalculationResult({required this.result, this.backend});
+
+  final String result;
+
+  /// Name of the backend that answered; null when the field is missing or not
+  /// a string. Display only.
+  final String? backend;
+}
+
 /// One calculation returned by `GET <service url>/history`.
 class HistoryItem {
   const HistoryItem({
@@ -90,8 +101,13 @@ class CalculatorApiClient {
         (base.host == 'localhost' || base.host == '127.0.0.1');
   }
 
-  /// POST `<service url>/<operation>`; returns the result as the backend printed it.
-  Future<String> calculate(String operation, double a, double b) async {
+  /// POST `<service url>/<operation>`; returns the result as the backend
+  /// printed it, plus the optional name of the backend that answered.
+  Future<CalculationResult> calculate(
+    String operation,
+    double a,
+    double b,
+  ) async {
     final response = await _send(
       (headers) => _http.post(
         Uri.parse('$_baseUrl/$operation'),
@@ -103,7 +119,11 @@ class CalculatorApiClient {
     if (data is! Map || data['result'] == null) {
       throw const ApiException('Unexpected response from the server.');
     }
-    return data['result'].toString();
+    final backend = data['backend'];
+    return CalculationResult(
+      result: data['result'].toString(),
+      backend: backend is String ? backend : null,
+    );
   }
 
   /// GET `<service url>/history`, newest first. Pass the previous page's

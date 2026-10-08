@@ -23,7 +23,11 @@ class CalculatorApp extends StatefulWidget {
     this.session,
     this.loginSupported = kIsWeb,
     this.apiBaseUrl,
+    this.stopwatchFactory,
   });
+
+  /// Stopwatch factory for the response time; only injected by tests.
+  final Stopwatch Function()? stopwatchFactory;
 
   /// Client for the calculator backends.
   final http.Client? httpClient;
@@ -87,6 +91,7 @@ class _CalculatorAppState extends State<CalculatorApp> {
         return CalculatorHomePage(
           session: _session,
           httpClient: widget.httpClient,
+          stopwatchFactory: widget.stopwatchFactory ?? Stopwatch.new,
           apiBaseUrl: widget.apiBaseUrl ?? deriveApiBaseUrl(),
         );
     }
@@ -99,8 +104,11 @@ class CalculatorHomePage extends StatefulWidget {
     required this.session,
     required this.apiBaseUrl,
     this.httpClient,
+    this.stopwatchFactory = Stopwatch.new,
   });
 
+  /// Creates the monotonic stopwatch of one calculation; tests inject a fake.
+  final Stopwatch Function() stopwatchFactory;
   final SessionController session;
   final http.Client? httpClient;
 
@@ -115,6 +123,11 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   final TextEditingController _controllerA = TextEditingController();
   final TextEditingController _controllerB = TextEditingController();
   String _result = '0';
+  String? _backend;
+  int? _responseMs;
+
+  /// Bumped whenever the shown outcome is reset, to drop late time updates.
+  int _generation = 0;
   bool _isLoading = false;
   String _selectedOperation = ApiConstants.defaultOperation;
 
@@ -164,14 +177,20 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     }
 
     setState(() {
+      _resetOutcome();
       _isLoading = true;
       _result = 'Calculating...';
     });
 
+    final stopwatch = widget.stopwatchFactory()..start();
     try {
-      final result = await client.calculate(_selectedOperation, a, b);
+      final answer = await client.calculate(_selectedOperation, a, b);
       if (!mounted) return;
-      setState(() => _result = result);
+      setState(() {
+        _result = answer.result;
+        _backend = answer.backend;
+      });
+      _stopAfterFrame(stopwatch);
       _scheduleHistoryRefresh();
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -179,6 +198,25 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Stops [stopwatch] once the frame that shows the result has been drawn and
+  /// shows the elapsed milliseconds (unless a newer action reset the page).
+  void _stopAfterFrame(Stopwatch stopwatch) {
+    final generation = _generation;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      stopwatch.stop();
+      if (!mounted || generation != _generation) return;
+      setState(() => _responseMs = stopwatch.elapsedMilliseconds);
+    });
+  }
+
+  /// Back to the initial result; the backend and the time are hidden.
+  void _resetOutcome() {
+    _generation++;
+    _result = '0';
+    _backend = null;
+    _responseMs = null;
   }
 
   /// The history is eventually consistent: wait a moment before reloading it. Only
@@ -233,7 +271,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     );
     void select() => setState(() {
           _selectedOperation = op;
-          _result = '0';
+          _resetOutcome();
         });
     return isSelected
         ? FilledButton(onPressed: select, child: label)
@@ -357,7 +395,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                     labelText: 'First Number',
                     labelStyle: TextStyle(fontSize: 22),
                   ),
-                  onChanged: (_) => setState(() => _result = '0'),
+                  onChanged: (_) => setState(_resetOutcome),
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -369,7 +407,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                     labelText: 'Second Number',
                     labelStyle: TextStyle(fontSize: 22),
                   ),
-                  onChanged: (_) => setState(() => _result = '0'),
+                  onChanged: (_) => setState(_resetOutcome),
                 ),
                 const SizedBox(height: 32),
                 Row(
@@ -394,6 +432,8 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                   style: const TextStyle(
                       fontSize: 22, fontWeight: FontWeight.bold),
                 ),
+                if (_backend != null) Text('Backend: $_backend'),
+                if (_responseMs != null) Text('Response time: $_responseMs ms'),
                 const SizedBox(height: 24),
                 const Divider(),
                 _buildHistory(context),

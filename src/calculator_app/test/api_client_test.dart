@@ -66,7 +66,7 @@ void main() {
       final client =
           clientAnswering((_) => _json({'result': '5'}), baseUrl: '$_baseUrl/');
 
-      expect(await client.calculate('add', 2, 3), '5');
+      expect((await client.calculate('add', 2, 3)).result, '5');
 
       final request = requests.single;
       expect(request.method, 'POST');
@@ -74,6 +74,25 @@ void main() {
       expect(request.headers['Authorization'], 'Bearer token-1');
       expect(request.headers.containsKey('x-api-key'), isFalse);
       expect(jsonDecode(request.body), {'a': 2.0, 'b': 3.0});
+    });
+
+    test('carries the backend string exactly as received', () async {
+      final client =
+          clientAnswering((_) => _json({'result': '5', 'backend': 'ecs'}));
+
+      expect((await client.calculate('add', 2, 3)).backend, 'ecs');
+    });
+
+    test('the backend is null when absent or not a string', () async {
+      for (final backend in <Object?>[null, 7, ['sls'], {'a': 1}]) {
+        final client = clientAnswering(
+            (_) => _json({'result': '5', 'backend': backend}));
+        expect((await client.calculate('add', 2, 3)).backend, isNull);
+      }
+      final absent = clientAnswering((_) => _json({'result': '5'}));
+      final parsed = await absent.calculate('add', 2, 3);
+      expect(parsed.result, '5');
+      expect(parsed.backend, isNull);
     });
 
     test('a 401 renews the token once and repeats the request once', () async {
@@ -85,7 +104,7 @@ void main() {
             : _json({'result': '5'});
       });
 
-      expect(await client.calculate('add', 2, 3), '5');
+      expect((await client.calculate('add', 2, 3)).result, '5');
 
       expect(tokens.renewals, 1);
       expect(requests.map((r) => r.headers['Authorization']),

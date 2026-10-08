@@ -50,9 +50,10 @@ The **Service URL** (below the title, after login) is a **read-only label**: you
 - If the configured address is not a valid http(s) URL the page shows "The API address is not a valid http(s) URL."
 - The page sends your login token only to `https` addresses (or `http://localhost` and `http://127.0.0.1` for local runs). For any other `http` address it shows "The API address must use https." and sends nothing, so the token is never sent over an unencrypted connection.
 
-## Calculations and history (unchanged)
+## Calculations and history
 
 - Type two numbers, choose an operation and press **Calculate**. The result is shown under the button.
+- Under the result the page shows `Backend: <value>`, exactly the name the backend reports (for example `sls` or `ecs`; the page does not know where the answer comes from), and `Response time: <n> ms`, the time from pressing Calculate until the result is displayed. Both lines are hidden while a calculation runs, when a field changes, and when the call fails; `Backend:` is also hidden if the backend sends no name.
 - The **History** section is not loaded automatically: press the refresh button to load it. Once opened it refreshes 2 seconds after each successful calculation. **Load more** shows older entries.
 - A backend without history shows "This service does not provide a history."
 - If a backend rejects your token the page renews it once and retries; if it still fails you return to the login screen. If a backend answers "forbidden" the error is shown and you stay logged in.
