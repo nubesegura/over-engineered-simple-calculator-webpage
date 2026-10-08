@@ -1,0 +1,25 @@
+name: Deploy PROD
+
+# Gitflow: every push to main deploys prod. The "prod" GitHub environment should have
+# required reviewers so the apply waits for a manual approval (recommended; none is configured today:
+# owner exception, single-user organization).
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: prod
+    secrets: inherit

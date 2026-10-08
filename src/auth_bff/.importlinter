@@ -1,0 +1,30 @@
+[importlinter]
+root_package = auth_bff
+include_external_packages = True
+
+[importlinter:contract:layers]
+name = Hexagonal layers: config -> adapters -> application -> domain
+type = layers
+layers =
+    auth_bff.config
+    auth_bff.adapters
+    auth_bff.application
+    auth_bff.domain
+
+[importlinter:contract:core_is_pure]
+name = Domain and application must not depend on infrastructure libraries
+type = forbidden
+source_modules =
+    auth_bff.domain
+    auth_bff.application
+forbidden_modules =
+    boto3
+    botocore
+
+[importlinter:contract:adapters_independent]
+name = Inbound adapters must not depend on outbound adapters (only on ports)
+type = forbidden
+source_modules =
+    auth_bff.adapters.inbound
+forbidden_modules =
+    auth_bff.adapters.outbound
