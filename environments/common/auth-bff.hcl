@@ -13,21 +13,21 @@ dependency "auth" {
   config_path = "${get_terragrunt_dir()}/../auth"
 
   mock_outputs = {
-    app_client_id                    = "mockappclientid"
-    app_client_secret_parameter_name = "/mock/dev/auth/app-client-secret"
-    app_client_secret_parameter_arn  = "arn:aws:ssm:us-east-2:000000000000:parameter/mock/dev/auth/app-client-secret"
+    app_client_id          = "mockappclientid"
+    app_client_secret_name = "sm-useast2-mock-auth-app-client-dev"
+    app_client_secret_arn  = "arn:aws:secretsmanager:us-east-2:000000000000:secret:sm-useast2-mock-auth-app-client-dev-AbCdEf"
   }
   mock_outputs_allowed_terraform_commands = ["init", "validate", "plan", "show"]
 }
 
 inputs = {
   # The module is copied to the Terragrunt cache, so the code folder is passed as a path.
-  source_dir                   = "${get_repo_root()}/src/auth_bff"
-  app_client_id                = dependency.auth.outputs.app_client_id
-  client_secret_parameter_name = dependency.auth.outputs.app_client_secret_parameter_name
-  client_secret_parameter_arn  = dependency.auth.outputs.app_client_secret_parameter_arn
-  allowed_origin               = "https://${local.env_vars.locals.web_domain_name}"
-  log_retention_days           = local.env_vars.locals.bff_log_retention_days
-  tracing_mode                 = local.env_vars.locals.bff_tracing_mode
-  alert_email                  = local.env_vars.locals.alert_email
+  source_dir         = "${get_repo_root()}/src/auth_bff"
+  app_client_id      = dependency.auth.outputs.app_client_id
+  client_secret_name = dependency.auth.outputs.app_client_secret_name
+  client_secret_arn  = dependency.auth.outputs.app_client_secret_arn
+  allowed_origin     = "https://${local.env_vars.locals.web_domain_name}"
+  log_retention_days = local.env_vars.locals.bff_log_retention_days
+  tracing_mode       = local.env_vars.locals.bff_tracing_mode
+  alert_email        = local.env_vars.locals.alert_email
 }

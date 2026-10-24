@@ -34,6 +34,8 @@ locals {
   # --- Authentication ---
   # Losing the pool loses every user (COG-04).
   user_pool_deletion_protection = "ACTIVE"
+  # Client secret recovery window: 30 days (SCRT-03).
+  secret_recovery_window_days = 30
 
   # --- Auth BFF (Lambda) ---
   bff_log_retention_days = 365

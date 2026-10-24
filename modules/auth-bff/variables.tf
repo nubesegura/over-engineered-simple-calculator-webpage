@@ -38,23 +38,23 @@ variable "app_client_id" {
   }
 }
 
-variable "client_secret_parameter_name" {
+variable "client_secret_name" {
   type        = string
-  description = "Name of the SSM SecureString parameter with the app client secret (output of the auth unit; a name, not the secret)"
+  description = "Name of the Secrets Manager secret with the app client secret (output of the auth unit; a name, not the secret)"
 
   validation {
-    condition     = can(regex("^/[A-Za-z0-9_./-]+$", var.client_secret_parameter_name))
-    error_message = "client_secret_parameter_name must be an SSM parameter path starting with /."
+    condition     = can(regex("^[A-Za-z0-9/_+=.@-]{1,512}$", var.client_secret_name))
+    error_message = "client_secret_name must be a valid Secrets Manager secret name."
   }
 }
 
-variable "client_secret_parameter_arn" {
+variable "client_secret_arn" {
   type        = string
-  description = "ARN of the SSM parameter with the app client secret (output of the auth unit); the only resource the role may read"
+  description = "ARN of the Secrets Manager secret with the app client secret (output of the auth unit); the only resource the role may read"
 
   validation {
-    condition     = can(regex("^arn:[a-z-]+:ssm:[a-z0-9-]+:[0-9]*:parameter/", var.client_secret_parameter_arn))
-    error_message = "client_secret_parameter_arn must be an SSM parameter ARN."
+    condition     = can(regex("^arn:[a-z-]+:secretsmanager:[a-z0-9-]+:[0-9]*:secret:", var.client_secret_arn))
+    error_message = "client_secret_arn must be a Secrets Manager secret ARN."
   }
 }
 

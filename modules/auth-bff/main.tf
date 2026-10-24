@@ -2,7 +2,7 @@
 # AWS_IAM authorization. It is reachable only through the CloudFront distribution (OAC);
 # the Lambda permission for CloudFront lives in modules/frontend because it needs the
 # distribution ARN. The function runs outside any VPC and calls Cognito unsigned, so its
-# role writes logs, reads one SSM parameter (the app client secret) and, when tracing is
+# role writes logs, reads one Secrets Manager secret (the app client secret) and, when tracing is
 # on, writes X-Ray traces.
 data "aws_region" "current" {}
 
@@ -50,9 +50,8 @@ resource "aws_cloudwatch_log_group" "bff" {
 }
 
 # ---------------------------------------------------------
-# Execution role: write to its own log group and read the single SSM parameter that holds
-# the app client secret (the AWS managed key needs no kms statement). No Cognito, S3 or
-# Secrets Manager action. X-Ray writes are added only when tracing is on (they do not support
+# Execution role: write to its own log group and read the single Secrets Manager secret that
+# holds the app client secret (the AWS managed key needs no kms statement). No Cognito or S3 action. X-Ray writes are added only when tracing is on (they do not support
 # resource-level scoping).
 # ---------------------------------------------------------
 data "aws_iam_policy_document" "assume" {
@@ -79,8 +78,8 @@ data "aws_iam_policy_document" "bff" {
   statement {
     sid       = "ReadClientSecret"
     effect    = "Allow"
-    actions   = ["ssm:GetParameter"]
-    resources = [var.client_secret_parameter_arn]
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [var.client_secret_arn]
   }
 
   dynamic "statement" {
@@ -124,13 +123,13 @@ resource "aws_lambda_function" "this" {
   filename         = data.archive_file.bff.output_path
   source_code_hash = data.archive_file.bff.output_base64sha256
 
-  # AWS_REGION is set by the Lambda runtime. No value is a secret: the parameter is a
-  # name; the function reads the secret from SSM at cold start.
+  # AWS_REGION is set by the Lambda runtime. No value is a secret: the variable is a
+  # name; the function reads the secret from Secrets Manager once per execution environment.
   environment {
     variables = {
-      COGNITO_APP_CLIENT_ID        = var.app_client_id
-      ALLOWED_ORIGIN               = var.allowed_origin
-      CLIENT_SECRET_PARAMETER_NAME = var.client_secret_parameter_name
+      COGNITO_APP_CLIENT_ID = var.app_client_id
+      ALLOWED_ORIGIN        = var.allowed_origin
+      CLIENT_SECRET_ID      = var.client_secret_name
     }
   }
 

@@ -1,4 +1,4 @@
-"""AWS Systems Manager Parameter Store implementation of the secret reader port.
+"""AWS Secrets Manager implementation of the secret reader port.
 
 Unlike the Cognito client, this one is a normal signed client: it uses the function role.
 """
@@ -15,31 +15,31 @@ _CONNECT_TIMEOUT_SECONDS = 2
 _READ_TIMEOUT_SECONDS = 5
 
 
-def create_ssm_client(region: str) -> Any:
-    """Build the ``ssm`` client with short timeouts and the default retries."""
+def create_secrets_manager_client(region: str) -> Any:
+    """Build the ``secretsmanager`` client with short timeouts and the default retries."""
     config = Config(
         connect_timeout=_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_READ_TIMEOUT_SECONDS,
         retries={"mode": "standard"},
     )
-    return boto3.client("ssm", region_name=region, config=config)
+    return boto3.client("secretsmanager", region_name=region, config=config)
 
 
-class SsmSecretReader:
-    """Reads a ``SecureString`` parameter, decrypted."""
+class SecretsManagerSecretReader:
+    """Reads the current string value of a secret, given its name or ARN."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def read(self, name: str) -> str:
         try:
-            response = self._client.get_parameter(Name=name, WithDecryption=True)
+            response = self._client.get_secret_value(SecretId=name)
         except ClientError as error:
             code = str(error.response.get("Error", {}).get("Code", "ClientError"))
             raise SecretUnavailableError(code) from None
         except BotoCoreError as error:
             raise SecretUnavailableError(type(error).__name__) from None
-        value = response.get("Parameter", {}).get("Value")
+        value = response.get("SecretString")
         if not isinstance(value, str) or not value:
-            raise SecretUnavailableError("EmptyParameter")
+            raise SecretUnavailableError("EmptySecret")
         return value

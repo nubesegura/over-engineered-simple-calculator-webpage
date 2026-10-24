@@ -23,7 +23,7 @@ ENVIRONMENT = {
     "COGNITO_APP_CLIENT_ID": "client-id",
     "ALLOWED_ORIGIN": ORIGIN,
     "AWS_REGION": "us-east-2",
-    "CLIENT_SECRET_PARAMETER_NAME": "/calc/dev/client-secret",
+    "CLIENT_SECRET_ID": "sm-useast2-oecalc-auth-app-client-dev",
 }
 CLIENT_SECRET = "handler-client-secret-0123456789"
 CONTEXT = SimpleNamespace(aws_request_id="req-123")
@@ -36,17 +36,19 @@ def _import_handler() -> Any:
     return importlib.import_module("handler")
 
 
-def _stub_ssm(monkeypatch: pytest.MonkeyPatch, stubber_out: list[Stubber]) -> None:
-    client = fake_credentials_client("ssm")
+def _stub_secrets_manager(monkeypatch: pytest.MonkeyPatch, stubber_out: list[Stubber]) -> None:
+    client = fake_credentials_client("secretsmanager")
     stubber = Stubber(client)
     stubber.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": "n", "Type": "SecureString", "Value": CLIENT_SECRET}},
-        {"Name": ENVIRONMENT["CLIENT_SECRET_PARAMETER_NAME"], "WithDecryption": True},
+        "get_secret_value",
+        {"Name": "n", "SecretString": CLIENT_SECRET},
+        {"SecretId": ENVIRONMENT["CLIENT_SECRET_ID"]},
     )
     stubber.activate()
     stubber_out.append(stubber)
-    monkeypatch.setattr("auth_bff.config.container.create_ssm_client", lambda region: client)
+    monkeypatch.setattr(
+        "auth_bff.config.container.create_secrets_manager_client", lambda region: client
+    )
 
 
 @pytest.fixture
@@ -54,7 +56,7 @@ def handler_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     for name, value in ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
     stubbers: list[Stubber] = []
-    _stub_ssm(monkeypatch, stubbers)
+    _stub_secrets_manager(monkeypatch, stubbers)
     module = _import_handler()
     stubbers[0].assert_no_pending_responses()
     yield module
@@ -94,7 +96,7 @@ def test_cold_start_fails_with_a_clear_error_when_variables_are_missing(
     sys.modules.pop("handler", None)
 
 
-def test_the_cognito_adapter_is_built_at_cold_start_with_the_secret_from_ssm(
+def test_the_cognito_adapter_is_built_at_cold_start_with_the_secret_from_secrets_manager(
     handler_module: Any,
 ) -> None:
     container: Container = handler_module._container
@@ -108,11 +110,13 @@ def test_cold_start_fails_when_the_runtime_boto3_cannot_renew_tokens(
 ) -> None:
     for name, value in ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
-    ssm = fake_credentials_client("ssm")
-    stubber = Stubber(ssm)
-    stubber.add_response("get_parameter", {"Parameter": {"Value": CLIENT_SECRET}})
+    secrets_manager = fake_credentials_client("secretsmanager")
+    stubber = Stubber(secrets_manager)
+    stubber.add_response("get_secret_value", {"SecretString": CLIENT_SECRET})
     stubber.activate()
-    monkeypatch.setattr("auth_bff.config.container.create_ssm_client", lambda region: ssm)
+    monkeypatch.setattr(
+        "auth_bff.config.container.create_secrets_manager_client", lambda region: secrets_manager
+    )
     monkeypatch.setattr(
         "auth_bff.config.container.create_cognito_client", lambda region: SimpleNamespace()
     )
@@ -122,27 +126,47 @@ def test_cold_start_fails_when_the_runtime_boto3_cannot_renew_tokens(
     sys.modules.pop("handler", None)
 
 
-@pytest.mark.parametrize("code", ["ParameterNotFound", "AccessDeniedException"])
-def test_cold_start_fails_when_the_secret_parameter_cannot_be_read(
+@pytest.mark.parametrize("code", ["ResourceNotFoundException", "AccessDeniedException"])
+def test_cold_start_fails_when_the_secret_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
     for name, value in ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
-    client = fake_credentials_client("ssm")
+    client = fake_credentials_client("secretsmanager")
     stubber = Stubber(client)
-    stubber.add_client_error("get_parameter", service_error_code=code, service_message="DETAIL")
+    stubber.add_client_error("get_secret_value", service_error_code=code, service_message="DETAIL")
     stubber.activate()
-    monkeypatch.setattr("auth_bff.config.container.create_ssm_client", lambda region: client)
+    monkeypatch.setattr(
+        "auth_bff.config.container.create_secrets_manager_client", lambda region: client
+    )
 
     with pytest.raises(ConfigurationError) as caught:
         _import_handler()
     sys.modules.pop("handler", None)
 
     message = str(caught.value)
-    assert ENVIRONMENT["CLIENT_SECRET_PARAMETER_NAME"] in message
+    assert ENVIRONMENT["CLIENT_SECRET_ID"] in message
     assert code in message
     assert "DETAIL" not in message
+    assert CLIENT_SECRET not in message
     assert caught.value.__cause__ is None
+
+
+def test_two_invocations_in_one_environment_read_the_secret_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    stubbers: list[Stubber] = []
+    _stub_secrets_manager(monkeypatch, stubbers)
+    module = _import_handler()
+
+    first = module.handler(_event("/auth/unknown"), CONTEXT)
+    second = module.handler(_event("/auth/unknown"), CONTEXT)
+    sys.modules.pop("handler", None)
+
+    assert first["statusCode"] == second["statusCode"]
+    stubbers[0].assert_no_pending_responses()
 
 
 def test_login_refresh_and_logout_through_the_handler(handler_module: Any) -> None:

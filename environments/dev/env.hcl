@@ -32,6 +32,8 @@ locals {
   # --- Authentication ---
   # dev is ephemeral: the pool can be destroyed with the stack.
   user_pool_deletion_protection = "INACTIVE"
+  # Client secret recovery window: 0 = delete immediately so a recreate works (SCRT-03).
+  secret_recovery_window_days = 0
 
   # --- Auth BFF (Lambda) ---
   bff_log_retention_days = 30

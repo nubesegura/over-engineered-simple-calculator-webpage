@@ -8,7 +8,10 @@ from auth_bff.adapters.outbound.cognito_identity_provider import (
     CognitoIdentityProvider,
     create_cognito_client,
 )
-from auth_bff.adapters.outbound.ssm_secret_reader import SsmSecretReader, create_ssm_client
+from auth_bff.adapters.outbound.secrets_manager_secret_reader import (
+    SecretsManagerSecretReader,
+    create_secrets_manager_client,
+)
 from auth_bff.application.ports import IdentityProvider, SecretReader, SecretUnavailableError
 from auth_bff.application.use_cases import Login, Logout, Refresh
 from auth_bff.config.logging import JsonRequestLog, configure_logging
@@ -34,13 +37,14 @@ class Container:
 
 
 def _read_client_secret(settings: Settings) -> str:
-    reader: SecretReader = SsmSecretReader(create_ssm_client(settings.region))
+    reader: SecretReader = SecretsManagerSecretReader(
+        create_secrets_manager_client(settings.region)
+    )
     try:
-        return reader.read(settings.client_secret_parameter_name)
+        return reader.read(settings.client_secret_id)
     except SecretUnavailableError as error:
         raise ConfigurationError(
-            f"Cannot read the client secret from parameter "
-            f"{settings.client_secret_parameter_name}: {error}"
+            f"Cannot read the client secret from secret {settings.client_secret_id}: {error}"
         ) from None
 
 
@@ -62,7 +66,7 @@ def build_container(
 ) -> Container:
     """Validate the settings and read the client secret (raising ``ConfigurationError``).
 
-    The secret is read from Parameter Store here, once per cold start, so a missing parameter
+    The secret is read from Secrets Manager here, once per cold start, so a missing secret
     makes the function fail to start instead of failing every request.
     """
     settings = load_settings(environ)

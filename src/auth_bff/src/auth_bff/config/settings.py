@@ -9,13 +9,13 @@ _LOCAL_DEFAULTS = {
     "COGNITO_APP_CLIENT_ID": "local-app-client-id",
     "ALLOWED_ORIGIN": "http://localhost:8080",
     "AWS_REGION": "us-east-2",
-    "CLIENT_SECRET_PARAMETER_NAME": "/local/client-secret",
+    "CLIENT_SECRET_ID": "local-client-secret",
 }
 _REQUIRED = (
     "COGNITO_APP_CLIENT_ID",
     "ALLOWED_ORIGIN",
     "AWS_REGION",
-    "CLIENT_SECRET_PARAMETER_NAME",
+    "CLIENT_SECRET_ID",
 )
 _LOCAL_HOST = "localhost"
 
@@ -30,7 +30,7 @@ class Settings:
     allowed_origin: str
     region: str
     environment: str
-    client_secret_parameter_name: str
+    client_secret_id: str
 
 
 def load_settings(environ: Mapping[str, str]) -> Settings:
@@ -52,7 +52,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         allowed_origin=allowed_origin,
         region=values["AWS_REGION"],
         environment=environment,
-        client_secret_parameter_name=values["CLIENT_SECRET_PARAMETER_NAME"],
+        client_secret_id=values["CLIENT_SECRET_ID"],
     )
 
 

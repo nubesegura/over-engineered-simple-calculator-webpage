@@ -6,7 +6,7 @@ DEPLOYED = {
     "COGNITO_APP_CLIENT_ID": "client-id",
     "ALLOWED_ORIGIN": "https://calculator.example.com",
     "AWS_REGION": "us-east-2",
-    "CLIENT_SECRET_PARAMETER_NAME": "/calc/dev/client-secret",
+    "CLIENT_SECRET_ID": "sm-useast2-oecalc-auth-app-client-dev",
 }
 
 
@@ -16,7 +16,7 @@ def test_deployed_settings_are_read_from_the_environment() -> None:
         allowed_origin="https://calculator.example.com",
         region="us-east-2",
         environment="",
-        client_secret_parameter_name="/calc/dev/client-secret",
+        client_secret_id="sm-useast2-oecalc-auth-app-client-dev",
     )
 
 
@@ -45,7 +45,7 @@ def test_local_environment_falls_back_to_defaults() -> None:
     assert settings.app_client_id
     assert settings.allowed_origin == "http://localhost:8080"
     assert settings.region == "us-east-2"
-    assert settings.client_secret_parameter_name
+    assert settings.client_secret_id
 
 
 def test_local_environment_still_honors_given_values() -> None:
