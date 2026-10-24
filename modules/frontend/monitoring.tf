@@ -1,5 +1,5 @@
 # ---------------------------------------------------------
-# Certificate expiry alerts (team standard ACM-03: 90/60/30/15 days).
+# Certificate expiry alerts (team standard ACM-03: 30 and 7 days, no more).
 #
 # The CloudFront certificate lives in us-east-1 and ACM publishes its DaysToExpiry
 # metric only there, while the rest of the stack is deployed in the environment's

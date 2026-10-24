@@ -1,6 +1,8 @@
 name: Deploy PROD
 
-# Gitflow: every push to main deploys prod. The "prod" GitHub environment should have
+# Gitflow: every push to main deploys prod with the tool named by the IAC_TOOL variable of the
+# prod GitHub environment (default cloudformation; the owner guard stops an environment owned by
+# the other tool). The "prod" GitHub environment should have
 # required reviewers so the apply waits for a manual approval (recommended; none is configured today:
 # owner exception, single-user organization).
 on:

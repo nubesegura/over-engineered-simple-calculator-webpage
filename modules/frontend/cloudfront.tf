@@ -154,7 +154,7 @@ resource "aws_cloudfront_distribution" "web" {
 
   # CloudFront distributions have no name attribute: the convention goes in the Name tag.
   tags = {
-    Name = "cdn-${local.name_mid}-web-${var.env_type}"
+    Name = "cfd-${local.name_mid}-web-${var.env_type}"
   }
 
   lifecycle {

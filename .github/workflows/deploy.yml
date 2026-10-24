@@ -1,10 +1,13 @@
 name: Deploy (reusable)
 
-# Provisions one environment with Terragrunt (Cognito, the auth BFF function, S3 +
-# CloudFront + ACM + Route 53), then
-# builds the Flutter web app and publishes it. Called by deploy-dev.yml and
-# deploy-prod.yml; the GitHub environment of the same name provides the secrets/variables
-# and, for prod, the manual approval gate.
+# Provisions one environment (Cognito, the auth BFF function, S3 + CloudFront + ACM +
+# Route 53) with the tool chosen by the GitHub environment variable IAC_TOOL, then builds the
+# Flutter web app and publishes it. IAC_TOOL is "cloudformation" (default when unset: SAM and
+# CloudFormation through scripts/cfn_deploy.py) or "terraform" (Terragrunt). Anything else fails.
+# The owner guard (scripts/iac_owner_guard.py) runs before any plan or deploy and stops the job
+# when the environment belongs to the other tool. Called by deploy-dev.yml and deploy-prod.yml;
+# the GitHub environment of the same name provides the secrets/variables and, for prod, the
+# manual approval gate.
 on:
   workflow_call:
     inputs:
@@ -21,26 +24,39 @@ env:
   FLUTTER_VERSION: "3.47.5"
   TERRAFORM_VERSION: "1.16.2"
   TERRAGRUNT_VERSION: "1.1.5"
+  PYTHON_VERSION: "3.14"
+  SAM_CLI_VERSION: "1.158.0"
 
 jobs:
   deploy:
     name: Deploy ${{ inputs.environment }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    # Never run two applies against the same state at once.
+    timeout-minutes: 90
+    # Never run two applies against the same state at once (same group as destroy-dev.yml).
     concurrency:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
     env:
-      # Read by env.hcl. Without SUPPORT_EMAIL the certificate alerts would go to a
-      # placeholder address.
+      # Default cloudformation; set the variable to terraform to use Terragrunt.
+      IAC_TOOL: ${{ vars.IAC_TOOL || 'cloudformation' }}
+      # Read by env.hcl (terraform) and by scripts/cfn_deploy.py (cloudformation). SUPPORT_EMAIL
+      # (certificate alert destination) and WAF_WEB_ACL_ARN are scoped to the steps that need them.
       ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
-      SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
-      WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
       TG_NON_INTERACTIVE: "true"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate IAC_TOOL
+        run: |
+          case "$IAC_TOOL" in
+            terraform | cloudformation) echo "IaC tool: $IAC_TOOL" ;;
+            *)
+              echo "::error::Variable IAC_TOOL must be 'terraform' or 'cloudformation' (got '$IAC_TOOL')"
+              exit 1
+              ;;
+          esac
 
       # Each environment is a different AWS account, and the branch decides which one:
       # develop -> dev, main -> prod. A manual run from any other branch
@@ -58,13 +74,13 @@ jobs:
           esac
 
       - name: Validate environment configuration
-        working-directory: environments/${{ inputs.environment }}
         env:
           TARGET: ${{ inputs.environment }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           ROLE_ARN_SET: ${{ secrets.ROLE_ARN != '' }}
           AWS_ACCOUNT_ID_SET: ${{ secrets.AWS_ACCOUNT_ID != '' }}
           SUPPORT_EMAIL_SET: ${{ secrets.SUPPORT_EMAIL != '' }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
         run: |
           missing=0
           for name in AWS_REGION ROUTE53_ZONE_ID; do
@@ -86,11 +102,33 @@ jobs:
             missing=1
           fi
           [ "$missing" -eq 0 ] || exit 1
-          # The provider region comes from env.hcl: the credentials must target the same one.
-          if ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" env.hcl; then
+          # Terraform only: the provider region comes from env.hcl and the credentials must target the same one.
+          if [ "$IAC_TOOL" = "terraform" ] && ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" environments/$TARGET/env.hcl; then
             echo "::error file=environments/$TARGET/env.hcl::AWS_REGION ($AWS_REGION) does not match aws_region in env.hcl"
             exit 1
           fi
+
+      # Installs run before the AWS credentials exist, so no package code sees them.
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: scripts/requirements-dev.txt
+
+      - name: Install script dependencies
+        run: pip install -r scripts/requirements-dev.txt
+
+      # SAM CLI pins its own boto3, so it lives in a separate venv and only the sam executable is
+      # put on PATH (scripts/cfn_deploy.py keeps the boto3 of requirements-dev.txt).
+      - name: Setup SAM CLI
+        if: env.IAC_TOOL == 'cloudformation'
+        run: |
+          python -m venv "$RUNNER_TEMP/sam-venv"
+          "$RUNNER_TEMP/sam-venv/bin/python" -m pip install --disable-pip-version-check "aws-sam-cli==${SAM_CLI_VERSION}"
+          mkdir -p "$RUNNER_TEMP/sam-bin"
+          ln -s "$RUNNER_TEMP/sam-venv/bin/sam" "$RUNNER_TEMP/sam-bin/sam"
+          echo "$RUNNER_TEMP/sam-bin" >> "$GITHUB_PATH"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
@@ -109,32 +147,84 @@ jobs:
             exit 1
           fi
 
+      # First action against the environment: stops when it is owned by the other tool, by both,
+      # or when the owner cannot be read (fail closed). Read-only: describe-stacks and the
+      # Terraform state objects (counted in memory, never printed or written).
+      - name: Owner guard
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          set +e
+          python scripts/iac_owner_guard.py check --env "$TARGET"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "Owner guard: '$TARGET' is free or already owned by $IAC_TOOL" ;;
+            2) echo "::error::'$TARGET' is owned by the other IaC tool. Destroy it with that tool, then change IAC_TOOL (or set IAC_TOOL to the owner)" ;;
+            3) echo "::error::Both Terraform and CloudFormation own resources in '$TARGET' (inconsistent). Fix by hand before deploying" ;;
+            *) echo "::error::The owner of '$TARGET' could not be determined (exit $rc); nothing was changed" ;;
+          esac
+          exit "$rc"
+
+      # ---- terraform path ----------------------------------------------------------
       - name: Setup IaC Tooling
+        if: env.IAC_TOOL == 'terraform'
         uses: ./.github/actions/setup-iac
         with:
           terraform-version: ${{ env.TERRAFORM_VERSION }}
           terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
 
       - name: Terragrunt Plan
+        if: env.IAC_TOOL == 'terraform'
         working-directory: environments/${{ inputs.environment }}
+        env:
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
         run: terragrunt run --all plan
 
       - name: Terragrunt Apply
+        if: env.IAC_TOOL == 'terraform'
         working-directory: environments/${{ inputs.environment }}
+        env:
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
         run: terragrunt run --all apply
 
+      # ---- cloudformation path -----------------------------------------------------
+      # Change sets are inspected by a guard before they run; replacements and deletions are refused.
+      - name: CloudFormation deploy
+        id: cfn
+        if: env.IAC_TOOL == 'cloudformation'
+        env:
+          TARGET: ${{ inputs.environment }}
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+        run: |
+          set -o pipefail
+          python scripts/cfn_deploy.py deploy --env "$TARGET" 2>&1 | tee "$RUNNER_TEMP/cfn-deploy.txt"
+
+      # ---- both paths --------------------------------------------------------------
       # The backends (sls, ecs) trust this environment's user pool. The owner copies these
       # two values by hand into the GitHub environment variables of the same name in each
       # backend repository. They are identifiers, not secrets.
       - name: Hand-off values for the backends
-        working-directory: environments/${{ inputs.environment }}/edge/auth
         env:
           TARGET: ${{ inputs.environment }}
         run: |
-          POOL_ID=$(terragrunt output -raw user_pool_id)
-          CLIENT_ID=$(terragrunt output -raw app_client_id)
+          if [ "$IAC_TOOL" = "terraform" ]; then
+            cd "environments/$TARGET/edge/auth"
+            POOL_ID=$(terragrunt output -raw user_pool_id)
+            CLIENT_ID=$(terragrunt output -raw app_client_id)
+          else
+            POOL_ID=$(sed -n 's/^COGNITO_USER_POOL_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+            CLIENT_ID=$(sed -n 's/^COGNITO_APP_CLIENT_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+          fi
+          if [ -z "$POOL_ID" ] || [ -z "$CLIENT_ID" ]; then
+            echo "::error::The Cognito identifiers could not be read from the deployment"
+            exit 1
+          fi
           {
-            echo "### Cognito hand-off ($TARGET)"
+            echo "### Cognito hand-off ($TARGET, $IAC_TOOL)"
             echo
             echo "Create these variables in the '$TARGET' GitHub environment of each backend repository (sls, ecs):"
             echo
@@ -169,11 +259,19 @@ jobs:
 
       - name: Publish web page
         id: publish
-        working-directory: environments/${{ inputs.environment }}/edge/frontend
+        env:
+          TARGET: ${{ inputs.environment }}
         run: |
-          BUCKET=$(terragrunt output -raw bucket_name)
-          DISTRIBUTION_ID=$(terragrunt output -raw distribution_id)
-          WEBSITE_URL=$(terragrunt output -raw website_url)
+          if [ "$IAC_TOOL" = "terraform" ]; then
+            cd "environments/$TARGET/edge/frontend"
+            BUCKET=$(terragrunt output -raw bucket_name)
+            DISTRIBUTION_ID=$(terragrunt output -raw distribution_id)
+            WEBSITE_URL=$(terragrunt output -raw website_url)
+          else
+            BUCKET=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key BucketName)
+            DISTRIBUTION_ID=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key DistributionId)
+            WEBSITE_URL=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key WebsiteUrl)
+          fi
           aws s3 sync "$GITHUB_WORKSPACE/src/calculator_app/build/web" "s3://$BUCKET" --delete
           aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
           echo "website_url=$WEBSITE_URL" >> "$GITHUB_OUTPUT"

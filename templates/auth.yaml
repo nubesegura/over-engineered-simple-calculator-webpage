@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Identity stack (twin of the Terraform unit edge/auth, module modules/auth): Cognito user pool, one
+  confidential app client used by the auth BFF (USER_PASSWORD_AUTH, admin-created users, no self sign-up,
+  no hosted UI), and the app client secret in a Secrets Manager secret with a TLS-only resource policy.
+  The secret value comes from the client ClientSecret attribute; it is never a parameter or an output.
+
+Parameters:
+  EnvType:
+    Type: String
+    AllowedValues: [dev, prod]
+    Description: Environment tier; last segment of every resource name
+  Context:
+    Type: String
+    Default: oecalc
+    AllowedPattern: "^[a-z0-9]+$"
+    Description: Functional context of the project (naming convention segment)
+  RegionCode:
+    Type: String
+    AllowedPattern: "^[a-z]+[0-9]+$"
+    Description: Region of this stack without hyphens (useast2), naming convention segment
+  UserPoolDeletionProtection:
+    Type: String
+    AllowedValues: [ACTIVE, INACTIVE]
+    Description: Deletion protection of the user pool; ACTIVE in prod (COG-04), INACTIVE in dev
+  # Mandatory tags written explicitly on the user pool (UserPoolTags). The deploy script fills them from
+  # the Tags section of parameters/<env>.json; the same five tags are also stack tags.
+  TagTeamOwner:
+    Type: String
+  TagProjectName:
+    Type: String
+  TagAppName:
+    Type: String
+  TagRepoName:
+    Type: String
+
+Rules:
+  ProdInvariants:
+    RuleCondition: !Equals [!Ref EnvType, prod]
+    Assertions:
+      - Assert: !Equals [!Ref UserPoolDeletionProtection, ACTIVE]
+        AssertDescription: prod requires UserPoolDeletionProtection ACTIVE (COG-04)
+
+Resources:
+  # LITE tier covers every setting below; threat protection is not used (it would need Plus).
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      UserPoolName: !Sub "cgnp-${RegionCode}-${Context}-${EnvType}"
+      UserPoolTier: LITE
+      DeletionProtection: !Ref UserPoolDeletionProtection
+      UsernameAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      MfaConfiguration: "OFF"
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
+      UserPoolTags:
+        team-owner: !Ref TagTeamOwner
+        project-name: !Ref TagProjectName
+        app-name: !Ref TagAppName
+        repo-name: !Ref TagRepoName
+        env-type: !Ref EnvType
+
+  # Confidential client. GenerateSecret and UserPoolId are create-only: changing them replaces the client
+  # (new client ID and secret) and every backend needs the new values.
+  AppClient:
+    Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      ClientName: !Sub "cgnc-${RegionCode}-${Context}-${EnvType}"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      RefreshTokenValidity: 24
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      TokenValidityUnits:
+        RefreshToken: hours
+        AccessToken: hours
+        IdToken: hours
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      AllowedOAuthFlowsUserPoolClient: false
+
+  # AWS managed key aws/secretsmanager (no KmsKeyId), no rotation (AD-S1), no replica. SecretString is
+  # write-only in the resource schema. CloudFormation has no recovery window property (AD-S2).
+  AppClientSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: Design 3.9 (approved 2026-10-24), AWS managed key aws/secretsmanager, no cross-account use; same as Terraform
+    Properties:
+      Name: !Sub "sm-${RegionCode}-${Context}-auth-app-client-${EnvType}"
+      Description: Client secret of the Cognito app client used by the auth BFF
+      SecretString: !GetAtt AppClient.ClientSecret
+
+  # Deny any request that is not over TLS (SCRT-06) and refuse a public policy (SCRT-07).
+  AppClientSecretPolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Properties:
+      SecretId: !Ref AppClientSecret
+      BlockPublicPolicy: true
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "secretsmanager:*"
+            Resource: !Ref AppClientSecret
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+Outputs:
+  UserPoolId:
+    Description: ID of the Cognito user pool (hand-off value COGNITO_USER_POOL_ID for the backends)
+    Value: !Ref UserPool
+  UserPoolArn:
+    Description: ARN of the Cognito user pool
+    Value: !GetAtt UserPool.Arn
+  IssuerUrl:
+    Description: Issuer (iss claim) of the tokens issued by the user pool
+    Value: !Sub "https://${UserPool.ProviderURL}"
+  AppClientId:
+    Description: ID of the confidential app client (hand-off value COGNITO_APP_CLIENT_ID; not a secret)
+    Value: !Ref AppClient
+  AppClientSecretName:
+    Description: Name of the Secrets Manager secret with the app client secret (a name, not the secret)
+    Value: !Sub "sm-${RegionCode}-${Context}-auth-app-client-${EnvType}"
+  AppClientSecretArn:
+    Description: ARN of the Secrets Manager secret with the app client secret (for the BFF role policy)
+    Value: !Ref AppClientSecret

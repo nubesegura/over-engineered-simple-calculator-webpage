@@ -96,7 +96,7 @@ data "aws_iam_policy_document" "bff" {
 
 resource "aws_iam_role" "bff" {
   # IAM roles are global: the region segment (shared by every resource) keeps the convention.
-  name               = "role-${local.name_mid}-auth-bff-${var.env_type}"
+  name               = "iamr-${local.name_mid}-auth-bff-${var.env_type}"
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 

@@ -68,7 +68,7 @@ variable "alert_email" {
 
 variable "certificate_expiry_alert_days" {
   type        = list(number)
-  default     = [90, 60, 30, 15]
+  default     = [30, 7]
   description = "Days before expiry at which an alarm fires (ACM-03)"
 }
 

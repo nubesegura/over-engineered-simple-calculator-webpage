@@ -1,6 +1,7 @@
 name: Deploy DEV
 
-# Gitflow: every push to develop deploys dev.
+# Gitflow: every push to develop deploys dev with the tool named by the IAC_TOOL variable of the
+# dev GitHub environment (default cloudformation; see deploy.yml).
 on:
   push:
     branches:

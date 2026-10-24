@@ -16,6 +16,10 @@ env:
   FLUTTER_VERSION: "3.47.5"
   TERRAFORM_VERSION: "1.16.2"
   TERRAGRUNT_VERSION: "1.1.5"
+  PYTHON_VERSION: "3.14"
+  CFN_LINT_VERSION: "1.48.1"
+  SAM_CLI_VERSION: "1.158.0"
+  CHECKOV_VERSION: "3.3.17"
 
 jobs:
   flutter:
@@ -192,3 +196,76 @@ jobs:
           EOF
           terraform -chdir="$root" init -backend=false -input=false
           terraform -chdir="$root" validate
+
+  # Runs on every run, whatever IAC_TOOL is, so both paths stay valid. Tools are pinned and
+  # installed in a venv. Checkov reads the skips declared in each resource Metadata.
+  cloudformation-lint:
+    name: CloudFormation (cfn-lint, sam validate, checkov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Pinned Tools
+        run: |
+          # Separate venvs: checkov pins boto3==1.35.x and aws-sam-cli pins boto3[crt]==1.42.x,
+          # so they cannot be resolved together.
+          python -m venv "$RUNNER_TEMP/cfn-venv"
+          "$RUNNER_TEMP/cfn-venv/bin/python" -m pip install --disable-pip-version-check \
+            "cfn-lint==${CFN_LINT_VERSION}" "aws-sam-cli==${SAM_CLI_VERSION}"
+          python -m venv "$RUNNER_TEMP/checkov-venv"
+          "$RUNNER_TEMP/checkov-venv/bin/python" -m pip install --disable-pip-version-check \
+            "checkov==${CHECKOV_VERSION}"
+          echo "$RUNNER_TEMP/cfn-venv/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/checkov-venv/bin" >> "$GITHUB_PATH"
+
+      # The certificate template lives in us-east-1 (CloudFront); the others in us-east-2.
+      - name: cfn-lint
+        run: |
+          set -euo pipefail
+          cfn-lint --regions us-east-1 -- templates/cert.yaml
+          cfn-lint --regions us-east-2 -- $(ls templates/*.yaml | grep -v '/cert\.yaml$')
+
+      - name: SAM Validate (lint)
+        run: sam validate --lint --region us-east-2 --template-file templates/auth-bff.yaml
+
+      - name: Checkov
+        run: checkov -d templates --framework cloudformation --compact --quiet
+
+  # Deploy and guard scripts of the CloudFormation path. Runs on every run, whatever IAC_TOOL is.
+  # Tests use fake AWS clients: no credentials and no network.
+  scripts:
+    name: Deploy scripts (ruff, mypy, pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: scripts/requirements-dev.txt
+
+      - name: Install Dependencies
+        run: pip install -r scripts/requirements-dev.txt
+
+      - name: Ruff Lint
+        run: ruff check scripts
+
+      - name: Ruff Format
+        run: ruff format --check scripts
+
+      - name: Mypy
+        run: mypy --config-file scripts/pyproject.toml scripts
+
+      - name: Test
+        run: pytest scripts/tests

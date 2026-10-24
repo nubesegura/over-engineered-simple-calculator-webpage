@@ -184,7 +184,7 @@ The permissions live in `modules/frontend` (they need the distribution ARN), eac
 - `lambda:InvokeFunctionUrl` with `function_url_auth_type = AWS_IAM`
 - `lambda:InvokeFunction` with `invoked_via_function_url = true` (a function URL now requires both)
 
-Execution role `role-useast2-oecalc-auth-bff-<env>`: `logs:CreateLogStream` and `logs:PutLogEvents` on its own log group only; `ssm:GetParameter` on the single parameter that holds the app client secret (the AWS managed key needs no `kms` statement); `xray:PutTraceSegments` and `xray:PutTelemetryRecords` only when tracing is active (prod). No Cognito, S3, Secrets Manager or `kms` action. No permissions boundary (gap G9).
+Execution role `iamr-useast2-oecalc-auth-bff-<env>`: `logs:CreateLogStream` and `logs:PutLogEvents` on its own log group only; `ssm:GetParameter` on the single parameter that holds the app client secret (the AWS managed key needs no `kms` statement); `xray:PutTraceSegments` and `xray:PutTelemetryRecords` only when tracing is active (prod). No Cognito, S3, Secrets Manager or `kms` action. No permissions boundary (gap G9).
 
 ## Function configuration
 

@@ -74,7 +74,7 @@ Per environment (each one deployed to its own AWS account, region `us-east-2`):
 - **SSM parameter** `/<context>/<env>/auth/app-client-secret` (`SecureString`, standard tier, AWS managed key) with the app client secret; only the BFF role can read it.
 - **BFF Lambda** (`modules/auth-bff`): Python 3.14 on arm64, reachable only through CloudFront (function URL with IAM authorization and origin access control). Its role writes its own logs and reads one SSM parameter (the app client secret); X-Ray is added in prod. See [Security notes](#security-notes) and `docs/architecture.md`.
 - **ACM certificate** (us-east-1, DNS validated in Route 53) and `A`/`AAAA` alias records.
-- **Certificate expiry alarms** (90, 60, 30 and 15 days) with an SNS email topic, both in us-east-1.
+- **Certificate expiry alarms** (30 and 7 days) with an SNS email topic, both in us-east-1.
 - **BFF alarms** (Lambda `Errors` and `Throttles`) with their own SNS email topic in us-east-2, see [Alerts](#alerts).
 - **API hostname:** not part of this repository since 2026-10-07 (certificate, weighted records and their alarms), see [Shared API hostname](#shared-api-hostname).
 - **prod only:** the distribution is associated with an existing shared WAF web ACL, see [WAF in prod](#waf-in-prod).
