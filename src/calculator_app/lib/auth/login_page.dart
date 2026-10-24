@@ -17,6 +17,7 @@ class _LoginPageState extends State<LoginPage> {
   final TextEditingController _email = TextEditingController();
   final TextEditingController _password = TextEditingController();
   bool _submitting = false;
+  bool _showPassword = false;
 
   @override
   void dispose() {
@@ -33,7 +34,10 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
     setState(() {
       _submitting = false;
-      if (!ok) _password.clear();
+      if (!ok) {
+        _password.clear();
+        _showPassword = false;
+      }
     });
   }
 
@@ -68,11 +72,23 @@ class _LoginPageState extends State<LoginPage> {
                   TextField(
                     key: const Key('login-password-field'),
                     controller: _password,
-                    obscureText: true,
+                    obscureText: !_showPassword,
                     enableSuggestions: false,
                     autocorrect: false,
                     enabled: !_submitting,
-                    decoration: const InputDecoration(labelText: 'Password'),
+                    decoration: InputDecoration(
+                      labelText: 'Password',
+                      suffixIcon: IconButton(
+                        key: const Key('login-password-toggle'),
+                        tooltip:
+                            _showPassword ? 'Hide password' : 'Show password',
+                        icon: Icon(_showPassword
+                            ? Icons.visibility_off
+                            : Icons.visibility),
+                        onPressed: () =>
+                            setState(() => _showPassword = !_showPassword),
+                      ),
+                    ),
                     onSubmitted: (_) => _submit(),
                   ),
                   const SizedBox(height: 24),

@@ -139,6 +139,124 @@ void main() {
     expect(find.byKey(const Key('login-progress')), findsNothing);
   });
 
+  group('password visibility toggle', () {
+    final toggle = find.byKey(const Key('login-password-toggle'));
+
+    bool obscured(WidgetTester tester) => tester
+        .widget<TextField>(find.byKey(const Key('login-password-field')))
+        .obscureText;
+
+    IconData toggleIcon(WidgetTester tester) => tester
+        .widget<Icon>(find.descendant(of: toggle, matching: find.byType(Icon)))
+        .icon!;
+
+    testWidgets('starts masked with the eye icon (1.1)', (tester) async {
+      await showLogin(tester);
+
+      expect(obscured(tester), isTrue);
+      expect(toggleIcon(tester), Icons.visibility);
+    });
+
+    testWidgets('one tap reveals, a second tap masks again (1.2, 1.3)',
+        (tester) async {
+      await showLogin(tester);
+
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(obscured(tester), isFalse);
+      expect(toggleIcon(tester), Icons.visibility_off);
+
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(obscured(tester), isTrue);
+      expect(toggleIcon(tester), Icons.visibility);
+    });
+
+    testWidgets('keeps the typed text (1.4)', (tester) async {
+      await showLogin(tester);
+      await typeCredentials(tester);
+
+      await tester.tap(toggle);
+      await tester.pump();
+
+      final password = tester
+          .widget<TextField>(find.byKey(const Key('login-password-field')));
+      expect(password.controller!.text, 'secret-pw');
+    });
+
+    testWidgets('the password field keeps focus after the tap (1.4)',
+        (tester) async {
+      await showLogin(tester);
+      await tester.tap(find.byKey(const Key('login-password-field')));
+      await tester.pump();
+      final field = find.descendant(
+          of: find.byKey(const Key('login-password-field')),
+          matching: find.byType(EditableText));
+      expect(tester.widget<EditableText>(field).focusNode.hasFocus, isTrue);
+
+      await tester.tap(toggle);
+      await tester.pump();
+
+      expect(tester.widget<EditableText>(field).focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('is disabled with the field while a login is in progress (1.6)',
+        (tester) async {
+      await showLogin(tester);
+      await typeCredentials(tester);
+      await tester.tap(find.byKey(const Key('login-submit')));
+      await tester.pump();
+      expect(find.byKey(const Key('login-progress')), findsOneWidget);
+
+      await tester.tap(toggle, warnIfMissed: false);
+      await tester.pump();
+
+      expect(obscured(tester), isTrue);
+      expect(api.calls.where((c) => c == 'login'), hasLength(1));
+    });
+
+    testWidgets('a failed login clears the password and masks it (1.5)',
+        (tester) async {
+      await showLogin(tester);
+      await typeCredentials(tester);
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(obscured(tester), isFalse);
+
+      await tester.tap(find.byKey(const Key('login-submit')));
+      await tester.pump();
+      api.loginAnswer.completeError(const AuthApiException(
+          'The username or password is incorrect.',
+          statusCode: 401));
+      await tester.pumpAndSettle();
+
+      final password = tester
+          .widget<TextField>(find.byKey(const Key('login-password-field')));
+      expect(password.controller!.text, isEmpty);
+      expect(obscured(tester), isTrue);
+      expect(toggleIcon(tester), Icons.visibility);
+    });
+
+    testWidgets('never submits the form (1.6)', (tester) async {
+      await showLogin(tester);
+      await typeCredentials(tester);
+
+      await tester.tap(toggle);
+      await tester.pump();
+
+      expect(api.calls, ['refresh']);
+    });
+
+    testWidgets('has a tooltip that follows the state (1.7)', (tester) async {
+      await showLogin(tester);
+      expect(find.byTooltip('Show password'), findsOneWidget);
+
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(find.byTooltip('Hide password'), findsOneWidget);
+    });
+  });
+
   testWidgets('an empty form does not call the BFF', (tester) async {
     await showLogin(tester);
 
