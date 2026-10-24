@@ -6,7 +6,8 @@ runs scripts/iac_owner_guard.py first; this script does not repeat that check.
 
 Command line (credentials from the environment or --profile; run from the repository root):
 
-    python scripts/cfn_deploy.py deploy --env dev|prod [--recover-rollback] [--profile P]
+    python scripts/cfn_deploy.py deploy --env dev|prod [--recover-rollback] [--review-only]
+                                        [--parameters-env dev|prod] [--profile P]
     python scripts/cfn_deploy.py destroy --env dev --mode plan|destroy [--profile P]
     python scripts/cfn_deploy.py output --env dev|prod --unit auth --key UserPoolId [--profile P]
 
@@ -24,13 +25,21 @@ deploy     Required variables (names only are validated, values are never printe
            other unexpected states are refused; --disable-rollback is never used.
            --recover-rollback (dev only) deletes a stack that is in ROLLBACK_COMPLETE, and only that one,
            then creates it again.
+           --review-only creates the change sets with the same checks, parameter loading, guard and masking,
+           prints the guarded summary of each and never executes one. Every change set is then deleted, and
+           so is the empty REVIEW_IN_PROGRESS shell its creation left, so no stack remains. Producer outputs
+           that do not exist yet are replaced by a placeholder (the printed change set is then indicative).
+           It is not combined with --recover-rollback and it does not attach protection or verify code.
+           --parameters-env (default: the value of --env) picks parameters/<name>.json, the EnvType and
+           env-type tag it must hold, and the variables that are required. Stack names, Regions and the
+           target account still come from --env. Allowed pairs (env, parameters-env): (dev, dev),
+           (prod, prod) and (dev, prod), the last one only with --review-only (rehearsal of prod values).
            prod also enables termination protection, attaches templates/stack-policy-prod.json (no replace
            or delete of the user pool, app client, secret, distribution and web bucket) and prints a
            read-only drift report of the stacks that already exist. The change-set guard refuses every
-           replacement and removal whatever the stack policy says, and ExecuteChangeSet cannot take a
-           temporary policy, so this script has no override: a replacement or removal in prod needs a
-           deliberate manual change set outside this script (owner decision pending). The strict policy is
-           attached again after each successful stack deploy.
+           replacement and removal, so a replacement or removal in prod needs a deliberate manual change
+           set outside this script, with a separate authorization. The policy is attached again after each
+           successful stack deploy.
 destroy    dev only. plan lists what exists and the Cognito user count and changes nothing. destroy empties
            the web bucket (dev only), deletes the stacks in reverse order (frontend, auth-bff, cert, auth)
            and force-deletes the client secret if it is left pending deletion, so the name can be reused.
@@ -80,6 +89,7 @@ STACK_TIMEOUT_SECONDS = 60 * 60
 CERT_TIMEOUT_SECONDS = 30 * 60
 DRIFT_TIMEOUT_SECONDS = 10 * 60
 DELETE_SETTLE_SECONDS = 60
+REVIEW_PLACEHOLDER = "review-only-placeholder"
 NO_CHANGES_MARKERS = ("didn't contain changes", "No updates are to be performed")
 
 OK_TO_DEPLOY = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE", "IMPORT_COMPLETE"})
@@ -110,6 +120,8 @@ CONSUMES: dict[str, list[tuple[str, str, str]]] = {
         ("BffFunctionUrlHost", "auth-bff", "FunctionUrlHost"),
     ],
 }
+
+ALLOWED_PARAMETER_PAIRS = frozenset({("dev", "dev"), ("prod", "prod"), ("dev", "prod")})
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 FileReader = Callable[[Path], str]
@@ -223,8 +235,12 @@ class Deployer:
         monotonic: Callable[[], float] = time.monotonic,
         profile: str | None = None,
         stacks_file: Path = STACKS_FILE,
+        parameters_env: str | None = None,
     ) -> None:
         self.env = env
+        self.parameters_env = parameters_env or env
+        if (env, self.parameters_env) not in ALLOWED_PARAMETER_PAIRS:
+            raise DeployError(f"--parameters-env {self.parameters_env} is not allowed with --env {env}")
         self.factory = factory
         self.runner = runner
         self.environ: Mapping[str, str] = os.environ if environ is None else environ
@@ -282,8 +298,8 @@ class Deployer:
 
     # -- configuration ------------------------------------------------------
     def load_parameters(self) -> dict[str, Any]:
-        """parameters/<env>.json, refused when its EnvType is another environment."""
-        path = PARAMETERS_DIR / f"{self.env}.json"
+        """parameters/<parameters-env>.json, refused when its EnvType is another environment."""
+        path = PARAMETERS_DIR / f"{self.parameters_env}.json"
         try:
             config = json.loads(self.files(path))
             parameters, tags = config["Parameters"], config["Tags"]
@@ -295,22 +311,33 @@ class Deployer:
         missing += [f"Tags.{k}" for k in REQUIRED_TAGS if k not in tags]
         if missing:
             raise DeployError(f"{path.name} lacks required keys: {', '.join(missing)}")
-        if parameters["EnvType"] != self.env:
-            raise DeployError(f"{path.name} has EnvType '{parameters['EnvType']}': it must be '{self.env}'")
-        if tags["env-type"] != self.env:
-            raise DeployError(f"{path.name} has tag env-type '{tags['env-type']}': it must be '{self.env}'")
+        expected = self.parameters_env
+        if parameters["EnvType"] != expected:
+            raise DeployError(f"{path.name} has EnvType '{parameters['EnvType']}': it must be '{expected}'")
+        if tags["env-type"] != expected:
+            raise DeployError(f"{path.name} has tag env-type '{tags['env-type']}': it must be '{expected}'")
         return dict(config)
 
     def required_variables(self) -> list[str]:
         names = ["ROUTE53_ZONE_ID", "SUPPORT_EMAIL"]
-        return [*names, "WAF_WEB_ACL_ARN"] if self.env == "prod" else names
+        return [*names, "WAF_WEB_ACL_ARN"] if self.parameters_env == "prod" else names
 
     def check_variables(self) -> None:
         missing = [n for n in self.required_variables() if not self.environ.get(n)]
         if missing:
             raise DeployError(f"missing required variables: {', '.join(missing)}")
 
-    def stack_parameters(self, entry: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str]]:
+    def producer_output(self, unit: str, key: str, review_only: bool) -> str:
+        """An output of a producer stack; in review-only a missing one becomes a placeholder."""
+        if not review_only:
+            return self.output_of(unit, key)
+        stack = self.describe(self.entry_of(unit))
+        outputs = {} if stack is None else {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+        return str(outputs.get(key, REVIEW_PLACEHOLDER))
+
+    def stack_parameters(
+        self, entry: dict[str, Any], config: dict[str, Any], review_only: bool = False
+    ) -> list[dict[str, str]]:
         declared = template_parameters(self.files(REPO_ROOT / entry["template"]))
         values: dict[str, str] = {k: str(v) for k, v in config["Parameters"].items()}
         for parameter, tag in TAG_PARAMETERS.items():
@@ -319,7 +346,7 @@ class Deployer:
             if self.environ.get(variable) is not None:
                 values[parameter] = str(self.environ[variable])
         for parameter, unit, key in CONSUMES.get(entry["unit"], []):
-            values[parameter] = self.output_of(unit, key)
+            values[parameter] = self.producer_output(unit, key, review_only)
         missing = [n for n, default in declared.items() if n not in values and default is None]
         if missing:
             raise DeployError(f"{entry['template']}: no value for parameters {missing}")
@@ -501,8 +528,13 @@ class Deployer:
             self.sleep(CHANGE_SET_POLL_SECONDS)
         raise DeployError(f"timed out waiting for the change set of {stack}")
 
-    def wait_execution(self, entry: dict[str, Any], name: str, timeout: float) -> None:
+    def wait_execution(self, entry: dict[str, Any], ref: str, timeout: float, kind: str = "UPDATE") -> None:
         """Wait until the change set reports that its execution finished.
+
+        `ref` is the change set Id (ARN): CloudFormation can drop the change set of a CREATE once its
+        execution starts, and then the name no longer resolves. If the change set is gone anyway, a CREATE
+        whose stack is already in a CREATE_IN_PROGRESS/CREATE_COMPLETE state moves on to the stack wait;
+        anything else fails closed.
 
         The status of the stack can still show the state before the execution for a moment, so the
         execution status of the change set is the signal; the stack status is checked afterwards.
@@ -511,8 +543,11 @@ class Deployer:
         deadline = self.monotonic() + timeout
         while self.monotonic() < deadline:
             try:
-                state = str(client.describe_change_set(StackName=stack, ChangeSetName=name).get("ExecutionStatus"))
+                state = str(client.describe_change_set(ChangeSetName=ref).get("ExecutionStatus"))
             except (ClientError, BotoCoreError) as exc:
+                gone = kind == "CREATE" and error_label(exc) == "ChangeSetNotFoundException"
+                if gone and self.status(entry) in ("CREATE_IN_PROGRESS", "CREATE_COMPLETE"):
+                    return
                 raise DeployError(f"cannot read the execution of {stack}: {type(exc).__name__}") from exc
             if state == "EXECUTE_COMPLETE":
                 return
@@ -585,7 +620,14 @@ class Deployer:
             raise DeployError(f"cannot protect {stack}: {type(exc).__name__}") from exc
         print(f"{stack}: termination protection on, stack policy attached")
 
-    def deploy_stack(self, entry: dict[str, Any], config: dict[str, Any], bucket: str | None, recover: bool) -> None:
+    def deploy_stack(
+        self,
+        entry: dict[str, Any],
+        config: dict[str, Any],
+        bucket: str | None,
+        recover: bool,
+        review_only: bool = False,
+    ) -> None:
         stack, unit = entry["stack"], entry["unit"]
         print(f"::group::{stack}")
         status = self.check_status(entry, self.status(entry), recover)
@@ -596,16 +638,16 @@ class Deployer:
             body = self.files(REPO_ROOT / entry["template"])
         if len(body.encode("utf-8")) > TEMPLATE_BODY_LIMIT:
             raise DeployError(f"{entry['template']} is larger than {TEMPLATE_BODY_LIMIT} bytes")
-        parameters = self.stack_parameters(entry, config)
-        if unit == "frontend":
-            values = {p["ParameterKey"]: p["ParameterValue"] for p in parameters}
+        parameters = self.stack_parameters(entry, config, review_only)
+        values = {p["ParameterKey"]: p["ParameterValue"] for p in parameters}
+        if unit == "frontend" and values["CertificateArn"] != REVIEW_PLACEHOLDER:
             self.verify_certificate(values["CertificateArn"], str(config["Parameters"]["DomainName"]))
         run_id = self.environ.get("GITHUB_RUN_ID", str(int(time.time())))
         attempt = self.environ.get("GITHUB_RUN_ATTEMPT", "1")
         name = re.sub(r"[^A-Za-z0-9-]", "-", f"iac-{run_id}-{attempt}-{unit}")[:128]
         kind = "CREATE" if status in (None, "REVIEW_IN_PROGRESS") else "UPDATE"
         try:
-            self.cfn(entry).create_change_set(
+            created = self.cfn(entry).create_change_set(
                 StackName=stack,
                 ChangeSetName=name,
                 ChangeSetType=kind,
@@ -616,19 +658,30 @@ class Deployer:
             )
         except (ClientError, BotoCoreError) as exc:
             raise DeployError(f"cannot create the change set of {stack}: {self.redact(str(exc))[:500]}") from exc
-        page = self.wait_change_set(entry, name)
+        try:
+            page = self.wait_change_set(entry, name)
+        except DeployError:
+            if review_only:
+                self.discard_change_set(entry, name)
+            raise
         if page is None:
             self.discard_change_set(entry, name)
             print(f"{stack}: no changes")
+        elif review_only:
+            self.guard_change_set(entry, name, page)
+            self.discard_change_set(entry, name)
+            print(f"{stack}: reviewed, change set deleted, nothing executed")
         else:
-            self.execute_if_safe(entry, name, page, kind)
-        if self.env == "prod":
-            self.harden_prod(entry, load_stack_policy())
-        if entry["sam"]:
-            self.verify_code(entry)
+            self.execute_if_safe(entry, name, page, kind, str(created.get("Id") or name))
+        if not review_only:
+            if self.env == "prod":
+                self.harden_prod(entry, load_stack_policy())
+            if entry["sam"]:
+                self.verify_code(entry)
         print("::endgroup::")
 
-    def execute_if_safe(self, entry: dict[str, Any], name: str, page: dict[str, Any], kind: str) -> None:
+    def guard_change_set(self, entry: dict[str, Any], name: str, page: dict[str, Any]) -> None:
+        """Print the changes and apply the guard; a refused change set is printed in full and deleted."""
         stack = entry["stack"]
         for change in page["Changes"]:
             detail = change.get("ResourceChange", {})
@@ -644,26 +697,37 @@ class Deployer:
                 print(f"::error::Change set guard: {stack}: {violation}")
             self.discard_change_set(entry, name)
             raise DeployError(f"the change set guard refused {stack}; the change set was deleted")
+
+    def execute_if_safe(self, entry: dict[str, Any], name: str, page: dict[str, Any], kind: str, ref: str) -> None:
+        stack = entry["stack"]
+        self.guard_change_set(entry, name, page)
         try:
-            self.cfn(entry).execute_change_set(StackName=stack, ChangeSetName=name)
+            self.cfn(entry).execute_change_set(ChangeSetName=ref)
         except (ClientError, BotoCoreError) as exc:
             raise DeployError(f"cannot execute the change set of {stack}: {type(exc).__name__}") from exc
         timeout = CERT_TIMEOUT_SECONDS if entry["unit"] == "cert" else STACK_TIMEOUT_SECONDS
-        self.wait_execution(entry, name, timeout)
+        self.wait_execution(entry, ref, timeout, kind)
         self.wait_stack(entry, ("CREATE_COMPLETE", "UPDATE_COMPLETE"), timeout)
         print(f"{stack}: {kind.lower()} complete")
 
-    def deploy(self, recover: bool = False) -> None:
+    def deploy(self, recover: bool = False, review_only: bool = False) -> None:
         if recover and self.env != "dev":
             raise DeployError("--recover-rollback is only allowed in dev")
+        if recover and review_only:
+            raise DeployError("--recover-rollback cannot be combined with --review-only")
+        if self.parameters_env != self.env and not review_only:
+            raise DeployError(f"--parameters-env {self.parameters_env} with --env {self.env} needs --review-only")
         config = self.load_parameters()
         self.check_variables()
         self.check_hosted_zone(config)
         sam_entries = [e for e in self.entries if e["sam"]]
         bucket = self.artifacts_bucket(sam_entries[0]) if sam_entries else None
         for entry in self.entries:
-            self.deploy_stack(entry, config, bucket, recover)
-        self.print_summary()
+            self.deploy_stack(entry, config, bucket, recover, review_only)
+        if review_only:
+            print("Review only: nothing was executed, all change sets were deleted.")
+        else:
+            self.print_summary()
 
     def print_summary(self) -> None:
         auth = self.outputs(self.entry_of("auth"))
@@ -771,7 +835,7 @@ class Deployer:
 
 
 def command_deploy(deployer: Deployer, args: argparse.Namespace) -> int:
-    deployer.deploy(recover=args.recover_rollback)
+    deployer.deploy(recover=args.recover_rollback, review_only=args.review_only)
     return 0
 
 
@@ -791,6 +855,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy = sub.add_parser("deploy")
     deploy.add_argument("--env", required=True, choices=ENVIRONMENTS)
     deploy.add_argument("--recover-rollback", action="store_true")
+    deploy.add_argument("--review-only", action="store_true")
+    deploy.add_argument("--parameters-env", choices=ENVIRONMENTS, default=None)
     deploy.set_defaults(handler=command_deploy)
     destroy = sub.add_parser("destroy")
     destroy.add_argument("--env", required=True, choices=["dev"])
@@ -827,6 +893,7 @@ def main(
             sleep=sleep,
             monotonic=monotonic,
             profile=args.profile,
+            parameters_env=getattr(args, "parameters_env", None),
         )
         return int(args.handler(deployer, args))
     except DeployError as exc:

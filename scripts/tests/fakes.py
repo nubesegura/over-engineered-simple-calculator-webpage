@@ -74,6 +74,9 @@ class FakeCfn:
         self.failed_execution: set[str] = set()
         self.delete_lag = 0
         self.deleting: dict[str, int] = {}
+        self.change_set_ids: dict[str, tuple[str, str]] = {}
+        self.consumed: set[str] = set()
+        self.consume_on_create = True
 
     def add_stack(self, name: str, status: str, **extra: Any) -> None:
         self.stacks[name] = {"status": status, "outputs": {}, "protection": False, "resources": []}
@@ -125,23 +128,37 @@ class FakeCfn:
             ],
         )
         self.change_sets[(name, kwargs["ChangeSetName"])] = {"changes": changes}
-        return {"Id": "cs"}
+        change_set_id = f"arn:aws:cloudformation:{self.region}:000000000000:changeSet/{kwargs['ChangeSetName']}/{name}"
+        self.change_set_ids[change_set_id] = (name, kwargs["ChangeSetName"])
+        return {"Id": change_set_id, "StackId": f"stack/{name}"}
 
-    def describe_change_set(self, StackName: str, ChangeSetName: str, **kwargs: str) -> dict[str, Any]:
-        if StackName in self.change_set_state:
-            status, reason = self.change_set_state[StackName]
+    def resolve(self, StackName: str | None, ChangeSetName: str) -> tuple[str, str]:
+        """An Id (ARN) resolves alone; a name needs the stack, as in CloudFormation."""
+        if ChangeSetName in self.change_set_ids:
+            return self.change_set_ids[ChangeSetName]
+        if StackName is None:
+            raise client_error("ValidationError", "StackName is required with a change set name")
+        return StackName, ChangeSetName
+
+    def describe_change_set(self, ChangeSetName: str, StackName: str | None = None, **kwargs: str) -> dict[str, Any]:
+        by_id = ChangeSetName in self.change_set_ids
+        stack_name, change_set = self.resolve(StackName, ChangeSetName)
+        if not by_id and stack_name in self.consumed:
+            raise client_error("ChangeSetNotFoundException", "ChangeSet does not exist", "DescribeChangeSet")
+        if stack_name in self.change_set_state:
+            status, reason = self.change_set_state[stack_name]
             return {"Status": status, "StatusReason": reason, "Changes": []}
-        if StackName in self.no_changes:
+        if stack_name in self.no_changes:
             return {
                 "Status": "FAILED",
                 "StatusReason": "The submitted information didn't contain changes.",
                 "Changes": [],
             }
-        changes = self.change_sets[(StackName, ChangeSetName)]["changes"]
+        changes = self.change_sets[(stack_name, change_set)]["changes"]
         start = int(kwargs.get("NextToken", "0"))
         page: dict[str, Any] = {
             "Status": "CREATE_COMPLETE",
-            "ExecutionStatus": self.execution_status(StackName),
+            "ExecutionStatus": self.execution_status(stack_name),
             "Changes": changes[start : start + self.page_size],
         }
         if start + self.page_size < len(changes):
@@ -158,26 +175,30 @@ class FakeCfn:
             return "EXECUTE_IN_PROGRESS"
         return "EXECUTE_FAILED" if stack in self.failed_execution else "EXECUTE_COMPLETE"
 
-    def execute_change_set(self, StackName: str, ChangeSetName: str) -> dict[str, Any]:
-        self.log.append(("execute_change_set", StackName))
-        stack = self.stacks[StackName]
+    def execute_change_set(self, ChangeSetName: str, StackName: str | None = None) -> dict[str, Any]:
+        stack_name, change_set = self.resolve(StackName, ChangeSetName)
+        self.log.append(("execute_change_set", stack_name))
+        stack = self.stacks[stack_name]
         created = stack["status"] == "REVIEW_IN_PROGRESS"
-        self.executed.add(StackName)
-        if StackName in self.stuck:
+        self.executed.add(stack_name)
+        if created and self.consume_on_create:
+            self.consumed.add(stack_name)
+        if stack_name in self.stuck:
             stack["status"] = "UPDATE_IN_PROGRESS"
             return {}
-        if StackName in self.failed_execution:
+        if stack_name in self.failed_execution:
             stack["status"] = "ROLLBACK_COMPLETE" if created else "UPDATE_ROLLBACK_COMPLETE"
             return {}
-        self.stale_status[StackName] = stack["status"]
-        self.pending[StackName] = self.lag_polls
+        self.stale_status[stack_name] = stack["status"]
+        self.pending[stack_name] = self.lag_polls
         stack["status"] = "CREATE_COMPLETE" if created else "UPDATE_COMPLETE"
-        stack["outputs"] = dict(self.outputs_on_create.get(StackName, stack["outputs"]))
+        stack["outputs"] = dict(self.outputs_on_create.get(stack_name, stack["outputs"]))
         return {}
 
-    def delete_change_set(self, StackName: str, ChangeSetName: str) -> dict[str, Any]:
-        self.log.append(("delete_change_set", StackName))
-        self.change_sets.pop((StackName, ChangeSetName), None)
+    def delete_change_set(self, ChangeSetName: str, StackName: str | None = None) -> dict[str, Any]:
+        stack_name, change_set = self.resolve(StackName, ChangeSetName)
+        self.log.append(("delete_change_set", stack_name))
+        self.change_sets.pop((stack_name, change_set), None)
         return {}
 
     def delete_stack(self, StackName: str) -> dict[str, Any]:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ProfileNotFound
+from botocore.exceptions import ClientError, ProfileNotFound
 from fakes import Clock, FakeBody, FakeCfn, FakeFactory, client_error, resource
 
 import cfn_deploy
@@ -726,6 +726,44 @@ def test_deploy_waits_for_the_execution_not_for_a_stale_status(world: World, exi
     assert len(world.operations("execute_change_set")) == 4
 
 
+def test_execution_wait_uses_the_change_set_id_so_a_consumed_create_still_resolves(world: World) -> None:
+    world.deployer().deploy()
+    assert world.east2.consumed
+    with pytest.raises(ClientError, match="ChangeSetNotFoundException"):
+        world.east2.describe_change_set(
+            StackName=world.stack("auth"), ChangeSetName=world.east2.created[0]["ChangeSetName"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "passes"),
+    [
+        ("CREATE", "CREATE_COMPLETE", True),
+        ("CREATE", "CREATE_IN_PROGRESS", True),
+        ("CREATE", "ROLLBACK_COMPLETE", False),
+        ("UPDATE", "UPDATE_COMPLETE", False),
+    ],
+)
+def test_change_set_gone_during_the_execution_wait(
+    world: World, monkeypatch: pytest.MonkeyPatch, kind: str, status: str, passes: bool
+) -> None:
+    entry = world.deployer().entry_of("auth")
+    world.east2.add_stack(entry["stack"], status)
+    world.east2.change_set_ids["gone"] = (entry["stack"], "x")
+    world.east2.consumed.add(entry["stack"])
+
+    def missing(**_: str) -> dict[str, str]:
+        raise client_error("ChangeSetNotFoundException")
+
+    monkeypatch.setattr(world.east2, "describe_change_set", missing)
+    deployer = world.deployer()
+    if passes:
+        deployer.wait_execution(entry, "gone", 60, kind)
+    else:
+        with pytest.raises(cfn_deploy.DeployError, match="cannot read the execution"):
+            deployer.wait_execution(entry, "gone", 60, kind)
+
+
 def test_failed_execution_is_reported_with_the_failed_events(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     world.east2.failed_execution.add(world.stack("auth"))
     world.east2.events = [
@@ -875,3 +913,124 @@ def test_missing_required_parameter_is_named(world: World, key: str) -> None:
     with pytest.raises(cfn_deploy.DeployError, match=key):
         deployer.deploy()
     assert world.log == []
+
+
+# ---------------------------------------------------------------------------
+# Review only and parameters-env
+# ---------------------------------------------------------------------------
+def review_deployer(world: World, parameters_env: str | None = None) -> cfn_deploy.Deployer:
+    environ = world.environ()
+    if parameters_env == "prod":
+        environ["WAF_WEB_ACL_ARN"] = WAF
+        world.route53.name = "nube-segura.com."
+    return cfn_deploy.Deployer(
+        env=world.env,
+        factory=world.factory(),
+        runner=world.runner,
+        environ=environ,
+        files=world.files,
+        sleep=world.clock.sleep,
+        monotonic=world.clock.monotonic,
+        parameters_env=parameters_env,
+    )
+
+
+def test_review_only_never_executes_and_leaves_no_change_set_or_shell(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    review_deployer(world).deploy(review_only=True)
+    assert world.operations("create_change_set") == [world.stack(u) for u in ("auth", "cert", "auth-bff", "frontend")]
+    assert world.operations("execute_change_set") == []
+    assert world.operations("delete_change_set") == world.operations("create_change_set")
+    assert world.operations("delete_stack") == world.operations("create_change_set")
+    assert world.east2.stacks == {} and world.east1.stacks == {}
+    assert world.east2.change_sets == {} and world.east1.change_sets == {}
+    assert world.operations("set_stack_policy") == []
+    out = capsys.readouterr().out
+    assert "COGNITO_USER_POOL_ID" not in out
+    assert "R0" in out and "nothing was executed" in out.lower()
+    assert EMAIL not in out and ZONE not in out
+
+
+def test_review_only_keeps_existing_stacks(world: World) -> None:
+    world.east2.add_stack(world.stack("auth"), "CREATE_COMPLETE")
+    review_deployer(world).deploy(review_only=True)
+    assert world.stack("auth") in world.east2.stacks
+    assert world.operations("delete_stack") == [world.stack(u) for u in ("cert", "auth-bff", "frontend")]
+
+
+def test_review_only_still_refuses_and_discards_a_bad_change_set(world: World) -> None:
+    world.east2.scripted_changes[world.stack("auth")] = [add_change("Remove")]
+    with pytest.raises(cfn_deploy.DeployError, match="guard"):
+        review_deployer(world).deploy(review_only=True)
+    assert world.operations("execute_change_set") == []
+    assert world.east2.change_sets == {}
+
+
+def test_review_only_discards_the_change_set_when_it_fails(world: World) -> None:
+    world.east2.change_set_state[world.stack("auth")] = ("FAILED", "Template error")
+    with pytest.raises(cfn_deploy.DeployError, match="failed"):
+        review_deployer(world).deploy(review_only=True)
+    assert world.operations("delete_change_set") == [world.stack("auth")]
+    assert world.operations("delete_stack") == [world.stack("auth")]
+
+
+def test_review_only_refuses_recovery(world: World) -> None:
+    with pytest.raises(cfn_deploy.DeployError, match="recover"):
+        review_deployer(world).deploy(recover=True, review_only=True)
+    assert world.log == []
+
+
+def test_producer_outputs_that_do_not_exist_yet_are_placeholders_in_review_only(world: World) -> None:
+    review_deployer(world).deploy(review_only=True)
+    bff = {p["ParameterKey"]: p["ParameterValue"] for p in world.east2.created[1]["Parameters"]}
+    assert bff["AppClientId"] == cfn_deploy.REVIEW_PLACEHOLDER
+
+
+def test_dev_rehearsal_uses_the_prod_parameter_values(world: World) -> None:
+    review_deployer(world, "prod").deploy(review_only=True)
+    first = {p["ParameterKey"]: p["ParameterValue"] for p in world.east2.created[0]["Parameters"]}
+    assert first["EnvType"] == "prod"
+    cert = {p["ParameterKey"]: p["ParameterValue"] for p in world.east1.created[0]["Parameters"]}
+    assert cert["DomainName"] == "over-engineered-simple-calculator.nube-segura.com"
+    assert {"Key": "env-type", "Value": "prod"} in world.east2.created[0]["Tags"]
+    assert world.east2.created[0]["StackName"] == world.stack("auth")
+    assert "-prod" not in world.east2.created[0]["StackName"]
+    assert world.operations("execute_change_set") == []
+
+
+def test_dev_with_prod_values_requires_review_only(world: World) -> None:
+    with pytest.raises(cfn_deploy.DeployError, match="review-only"):
+        review_deployer(world, "prod").deploy()
+    assert world.log == []
+
+
+def test_prod_with_dev_values_is_refused() -> None:
+    world = World("prod")
+    with pytest.raises(cfn_deploy.DeployError, match="not allowed"):
+        review_deployer(world, "dev")
+
+
+def test_parameters_env_equal_to_env_is_the_default(world: World) -> None:
+    review_deployer(world, "dev").deploy(review_only=True)
+    first = {p["ParameterKey"]: p["ParameterValue"] for p in world.east2.created[0]["Parameters"]}
+    assert first["EnvType"] == "dev"
+
+
+def test_main_review_only_and_parameters_env(world: World) -> None:
+    world.route53.name = "nube-segura.com."
+    argv = ["deploy", "--env", "dev", "--review-only", "--parameters-env", "prod"]
+    assert (
+        cfn_deploy.main(
+            argv,
+            factory=world.factory(),
+            runner=world.runner,
+            environ={**world.environ(), "WAF_WEB_ACL_ARN": WAF},
+            files=world.files,
+            sleep=world.clock.sleep,
+            monotonic=world.clock.monotonic,
+        )
+        == 0
+    )
+    assert world.operations("execute_change_set") == []
+    assert run_main(World(), ["deploy", "--env", "dev", "--parameters-env", "prod"]) == 1

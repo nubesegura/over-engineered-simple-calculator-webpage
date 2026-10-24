@@ -262,7 +262,7 @@ Outputs:
     Description: Host of the function URL, without scheme or path (second CloudFront origin)
     Value: !Select [2, !Split ["/", !GetAtt FunctionUrl.FunctionUrl]]
   ErrorsAlarmArn:
-    Description: ARN of the Errors alarm (prod-only RollbackConfiguration applied by the deploy script)
+    Description: ARN of the Errors alarm
     Value: !GetAtt ErrorsAlarm.Arn
   AlertsTopicArn:
     Description: ARN of the BFF alert topic
