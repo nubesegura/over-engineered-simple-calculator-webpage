@@ -201,7 +201,10 @@ jobs:
           WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
         run: |
           set -o pipefail
-          python scripts/cfn_deploy.py deploy --env "$TARGET" 2>&1 | tee "$RUNNER_TEMP/cfn-deploy.txt"
+          # Dev only: a stack left in ROLLBACK_COMPLETE by a failed first create is deleted and created again.
+          RECOVER=""
+          if [ "$TARGET" = "dev" ]; then RECOVER="--recover-rollback"; fi
+          python scripts/cfn_deploy.py deploy --env "$TARGET" $RECOVER 2>&1 | tee "$RUNNER_TEMP/cfn-deploy.txt"
 
       # ---- both paths --------------------------------------------------------------
       # The backends (sls, ecs) trust this environment's user pool. The owner copies these
