@@ -60,7 +60,12 @@ environments/
   <env>/edge/frontend/     Thin Terragrunt unit
   <env>/edge/auth/         Thin Terragrunt unit
   <env>/edge/auth-bff/     Thin Terragrunt unit
-docs/                      Architecture, technical and functional docs, ADRs, migrations, architecture.drawio
+templates/                 CloudFormation/SAM templates (auth, cert, auth-bff, frontend), stacks.json, prod stack policy
+parameters/                dev.json and prod.json: values and mandatory tags for the CloudFormation path
+samconfig.toml             SAM build and package settings ([dev] and [prod])
+scripts/                   cfn_deploy.py, iac_owner_guard.py, iac_inventory.py, post_destroy_check.py, tests/
+scripts/e2e/               Recorded browser test of the deployed dev site (dev only), see its README
+docs/                      Architecture, technical and functional docs, ADRs, migrations, architect_components.* and architect_layers.* diagrams
 .github/                   CI, reusable deploy workflow, dev/prod entrypoints
 ```
 
@@ -71,8 +76,8 @@ Per environment (each one deployed to its own AWS account, region `us-east-2`):
 - **S3 bucket** `bckt-useast2-oecalc-web-<env>-<account>`: private, block public access, versioning with lifecycle for old versions, SSE-S3 encryption, TLS-only policy, readable only by the distribution (OAC).
 - **CloudFront** with OAC, TLS 1.2, HTTP/2 and HTTP/3, compression, HSTS, a Content Security Policy and other security headers, and the app shell served for unknown paths. The ordered behavior `/auth/*` goes to the BFF; everything else goes to S3.
 - **Cognito user pool and confidential app client** (`modules/auth`), see [Users and the user pool](#users-and-the-user-pool).
-- **SSM parameter** `/<context>/<env>/auth/app-client-secret` (`SecureString`, standard tier, AWS managed key) with the app client secret; only the BFF role can read it.
-- **BFF Lambda** (`modules/auth-bff`): Python 3.14 on arm64, reachable only through CloudFront (function URL with IAM authorization and origin access control). Its role writes its own logs and reads one SSM parameter (the app client secret); X-Ray is added in prod. See [Security notes](#security-notes) and `docs/architecture.md`.
+- **Secrets Manager secret** `sm-useast2-oecalc-auth-app-client-<env>` (AWS managed key, no rotation, TLS-only resource policy) with the app client secret; only the BFF role can read it.
+- **BFF Lambda** (`modules/auth-bff`): Python 3.14 on arm64, reachable only through CloudFront (function URL with IAM authorization and origin access control). Its role writes its own logs and reads one secret (`secretsmanager:GetSecretValue` on the app client secret); X-Ray is added in prod. See [Security notes](#security-notes) and `docs/architecture.md`.
 - **ACM certificate** (us-east-1, DNS validated in Route 53) and `A`/`AAAA` alias records.
 - **Certificate expiry alarms** (30 and 7 days) with an SNS email topic, both in us-east-1.
 - **BFF alarms** (Lambda `Errors` and `Throttles`) with their own SNS email topic in us-east-2, see [Alerts](#alerts).
@@ -99,15 +104,15 @@ The pool exposes two identifiers, printed in the job summary of each deployment 
 - `user_pool_id` (hand-off name `COGNITO_USER_POOL_ID`)
 - `app_client_id` (hand-off name `COGNITO_APP_CLIENT_ID`)
 
-(The module also outputs the pool ARN, the issuer URL and the name and ARN of the SSM parameter. The secret itself is never an output, an environment variable or a log line.)
+(The Terraform module also outputs the pool ARN, the issuer URL and the name and ARN of the secret. The secret value itself is never an output, an environment variable or a log line.)
 
 #### The client secret
 
-- Cognito generates the secret when the app client is created; Terraform writes it to the SSM `SecureString` parameter `/<context>/<env>/auth/app-client-secret`. The BFF receives only the parameter **name** (`CLIENT_SECRET_PARAMETER_NAME`), its role may call `ssm:GetParameter` on that one parameter, and it reads the value once at cold start and keeps it in memory.
-- **The secret is also in the Terraform state** (a known limitation of the providers). Keep the state bucket encrypted with restricted access.
+- Cognito generates the secret when the app client is created; both IaC tools store it in the Secrets Manager secret `sm-useast2-oecalc-auth-app-client-<env>` (spec 006; it replaced an SSM `SecureString` parameter, see [ADR 0008](docs/adr/0008-dual-iac-terraform-and-cloudformation.md)). The BFF receives only the secret **name** (`CLIENT_SECRET_ID`), its role may call `secretsmanager:GetSecretValue` on that one secret, and it reads the value once at cold start and keeps it in memory.
+- **With Terraform the secret is also in the Terraform state** (a known limitation of the providers). Keep the state bucket encrypted with restricted access. With CloudFormation there is no state file.
 - **Enabling the secret replaces the app client, so the client ID changes.** Every backend must receive the new `COGNITO_APP_CLIENT_ID` (see the hand-off below). Tokens issued by the old client stop being valid for the backends.
 - **Rotation is manual:** the client secret is not rotated in place. Rotating means creating a new app client (a new ID and a new secret) and handing the new ID to the backends.
-- If the parameter is missing or unreadable, the function fails at cold start with a clear message.
+- If the secret is missing or unreadable, the function fails at cold start with a clear message.
 - **Runtime requirement (not yet verified):** renewal uses the Cognito operation `GetTokensFromRefreshToken`, so the `boto3` of the Lambda runtime must include `get_tokens_from_refresh_token`. If it does not, the function fails at cold start with the message "The boto3 of this runtime has no get_tokens_from_refresh_token: package a newer boto3 with the function." The package today contains no dependencies (it relies on the runtime's boto3); if the check fails, boto3 must be packaged with the function.
 
 #### Create a user (one time per user and environment)
@@ -160,7 +165,38 @@ This repository forgot those resources with Terraform `removed` blocks (`destroy
 
 What stays here for the API: the page calculates the read-only Service URL (`https://api.<host of the page>/api/v1`) and sends the ID token to it; Cognito and the BFF issue the token. Changing weights never rebuilds or redeploys the page.
 
-### Run Terragrunt by hand
+### Two ways to deploy: CloudFormation/SAM and Terraform
+
+The same infrastructure can be deployed with **CloudFormation/SAM** (`templates/`, `parameters/`, `scripts/cfn_deploy.py`) or with **Terraform** (Terragrunt units under `environments/`). Both build the same resources with the same names and tags; the Terraform code is the specification of the parity. Decision: [ADR 0008](docs/adr/0008-dual-iac-terraform-and-cloudformation.md). Stacks and resources: [`docs/architecture.md`](docs/architecture.md) and [`templates/README.md`](templates/README.md).
+
+- **`IAC_TOOL` switch.** The GitHub environment variable `IAC_TOOL` of each environment selects the tool: `cloudformation` (the default when the variable is unset or empty) or `terraform`. Any other value fails the deploy before anything runs.
+- **Owner guard.** One tool owns an environment at a time. `scripts/iac_owner_guard.py` runs first in the Deploy and Destroy workflows, reads what exists (CloudFormation stacks of `templates/stacks.json` in both regions, and the Terraform state objects, counted in memory) and stops when the environment belongs to the other tool, to both, or when the owner cannot be read (it fails closed). Exit codes: 0 free or owned by the selected tool, 2 owned by the other tool, 3 both, 4 not determined.
+- **Change-set guard.** `cfn_deploy.py` creates a change set per stack and executes it only if it contains additions and modifications that are not replacements; a replacement, removal, import or unknown change is refused and the change set is deleted. Stacks in a failed or in-progress state are refused; only dev can recover a `ROLLBACK_COMPLETE` stack (`--recover-rollback`, passed by the workflow for dev only).
+- **Stacks.** Four stacks per environment, in order: `auth`, `cert` (us-east-1), `auth-bff` (SAM) and `frontend`. Values pass between stacks as parameters set by the script (no exports).
+- **Status (2026-10-25).** Dev is owned by CloudFormation: the four stacks were deployed on 2026-10-24 by the Deploy DEV workflow. **Prod stays owned by Terraform** and has no CloudFormation stack; moving it is deferred to backlog item B003 (artifacts bucket in the prod account, rehearsal, destroy with Terragrunt and recreate with CloudFormation, hand-off to the other repositories, each with its own authorization). Until then **set `IAC_TOOL` to `terraform` in the `prod` GitHub environment before any merge to `main`**; with the default value a prod deploy stops at the owner guard (exit 2), which is the designed behavior and changes nothing.
+
+#### Deploy with CloudFormation (GitHub Actions)
+
+The workflows `deploy-dev.yml` (push to `develop`) and `deploy-prod.yml` (push to `main`) call `deploy.yml`. With `IAC_TOOL=cloudformation` it validates the configuration, logs in with OIDC, checks the account, runs the owner guard, packages the BFF with SAM and runs `cfn_deploy.py deploy --env <env>`, prints the Cognito hand-off, builds and publishes the page, and runs the page and BFF smoke tests. Prerequisite in each account: the shared artifacts bucket of the add-ons repository, whose name is read from the SSM parameter `/nube-segura/account-addons/artifacts/bucket-name` (deployed in dev; **not** deployed in prod yet). In prod the deploy also needs `WAF_WEB_ACL_ARN`, and it sets termination protection and a stack policy that denies replacement or deletion of the user pool, app client, secret, distribution and web bucket.
+
+#### Run the scripts by hand
+
+All commands run from the repository root with credentials for the environment's account (add `--profile <name>` to use a local profile). Running outside the workflow skips the workflow's checks, so use it only for dev or for a read-only review.
+
+```bash
+pip install -r scripts/requirements-dev.txt
+python scripts/iac_owner_guard.py detect --env dev                    # owner=terraform|cloudformation|none|both
+python scripts/cfn_deploy.py deploy --env dev --review-only           # create the change sets, show them, execute nothing
+python scripts/cfn_deploy.py deploy --env dev                         # needs SAM CLI, ROUTE53_ZONE_ID, SUPPORT_EMAIL
+python scripts/cfn_deploy.py deploy --env dev --recover-rollback      # dev only: delete a stack left in ROLLBACK_COMPLETE first
+python scripts/cfn_deploy.py deploy --env dev --parameters-env prod --review-only   # rehearse prod values (see docs/technical.md)
+python scripts/cfn_deploy.py output --env dev --unit frontend --key <output name>
+python scripts/cfn_deploy.py destroy --env dev --mode plan            # dev only; use --mode destroy to delete
+```
+
+A replacement (for example a change to the user pool or app client that forces a new resource) is never executed by the script; it needs a manual change set with the owner's separate authorization.
+
+### Run Terragrunt by hand (Terraform path, used by prod today)
 
 ```bash
 export ROUTE53_ZONE_ID=<hosted zone id of the environment's account>   # or environments/<env>/secrets.yml
@@ -189,23 +225,23 @@ aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths 
 
 ## Deployment order
 
-1. **This repository first**: deploy `dev` (push to `develop`) or `prod` (push to `main`). The workflow creates the pool, the BFF and the distribution, publishes the page and prints the two Cognito values.
+1. **This repository first**: deploy `dev` (push to `develop`) or `prod` (push to `main`; see the `IAC_TOOL` note above, prod is Terraform-owned until B003). The workflow creates the pool, the BFF and the distribution, publishes the page and prints the two Cognito values.
 2. Confirm the SNS email subscriptions, and create the user(s) with a permanent password.
 3. **Then the variables**: create `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID` in the matching GitHub environment of each backend repository.
 4. **Then the backend** repositories, which validate tokens with that pool. Their record under `api.<web domain>` is created from the shared-resources repository (see [Shared API hostname](#shared-api-hostname)); this repository is not deployed again for it.
 
 ## CI/CD (gitflow)
 
-- `ci.yml` (pull requests to `develop` / `main`, reused by the deploys): Flutter job (`flutter analyze`, `flutter test`, `flutter build web --no-web-resources-cdn`), BFF job (installs the fully pinned `requirements-dev.txt`, `pip-audit`, `ruff check`, `ruff format --check`, `mypy`, `lint-imports`, `pytest` with at least 85% coverage), IaC job (`terraform fmt`, `terragrunt hcl fmt`, mandatory tags and remote state checks) and a Terraform job (`terraform validate` of each module, without credentials).
+- `ci.yml` (pull requests to `develop` / `main`, reused by the deploys): Flutter job (`flutter analyze`, `flutter test`, `flutter build web --no-web-resources-cdn`), BFF job (installs the fully pinned `requirements-dev.txt`, `pip-audit`, `ruff check`, `ruff format --check`, `mypy`, `lint-imports`, `pytest` with at least 85% coverage), IaC job (`terraform fmt`, `terragrunt hcl fmt`, mandatory tags and remote state checks), a Terraform job (`terraform validate` of each module, without credentials), a `cloudformation-lint` job (`cfn-lint`, `sam validate --lint` and `checkov` over `templates/`, on every run whatever `IAC_TOOL` is) and a `scripts` job (`ruff`, `mypy` and `pytest` for `scripts/`, including the offline e2e tool tests).
 - Dependabot (weekly) covers `pub`, `pip` (`/src/auth_bff`), GitHub Actions and Terraform.
-- `deploy-dev.yml` (push to `develop`) and `deploy-prod.yml` (push to `main`) run CI and then `deploy.yml`: configuration check, OIDC login, account check, `terragrunt run --all plan/apply`, the Cognito hand-off summary, Flutter build, `s3 sync`, CloudFront invalidation, a smoke test of the public URL and a smoke test of the BFF (`POST /auth/refresh` without a cookie must answer 401 with a JSON body).
+- `deploy-dev.yml` (push to `develop`) and `deploy-prod.yml` (push to `main`) run CI and then `deploy.yml`: configuration check, OIDC login, account check, owner guard, then either `terragrunt run --all plan/apply` (`IAC_TOOL=terraform`) or `cfn_deploy.py deploy` (`IAC_TOOL=cloudformation`, the default), the Cognito hand-off summary, Flutter build, `s3 sync`, CloudFront invalidation, a smoke test of the public URL and a smoke test of the BFF (`POST /auth/refresh` without a cookie must answer 401 with a JSON body).
 
 Each GitHub environment (`dev`, `prod`) needs the secrets `ROLE_ARN`, `AWS_ACCOUNT_ID` and `SUPPORT_EMAIL` (alert address) and the variables `AWS_REGION` and `ROUTE53_ZONE_ID`. The `prod` environment also needs the variable `WAF_WEB_ACL_ARN`, and should require reviewers so the apply waits for a manual approval.
 
 ## Gitflow and first deployment
 
 - A push to `develop` runs CI and then deploys **dev** (GitHub environment `dev`).
-- A push to `main` runs CI and then deploys **prod** (GitHub environment `prod`) after the **manual approval** of the `prod` environment (configure required reviewers on it).
+- A push to `main` runs CI and then deploys **prod** (GitHub environment `prod`) after the **manual approval** of the `prod` environment (configure required reviewers on it). Prod is Terraform-owned until B003: set `IAC_TOOL=terraform` in the `prod` environment first, or the owner guard stops the deploy.
 - A deploy from any other branch is refused.
 
 Each GitHub environment needs:
@@ -217,19 +253,22 @@ Each GitHub environment needs:
 | Secret | `SUPPORT_EMAIL` | Address of the alert subscriptions |
 | Variable | `AWS_REGION` | Must match `aws_region` in `env.hcl` (`us-east-2`) |
 | Variable | `ROUTE53_ZONE_ID` | Hosted zone of that account |
+| Variable | `IAC_TOOL` | `cloudformation` (default when unset) or `terraform`. **Set `terraform` in `prod` before any merge to `main`** |
 | Variable | `API_BASE_URL` | Optional: build-time override of the Service URL label (empty = calculated address) |
 | Variable | `WAF_WEB_ACL_ARN` | **prod only**: existing CloudFront-scope web ACL in us-east-1 |
 
 The OIDC deployment role needs permissions for the services below (a checklist; the policy itself is not defined in this repository):
 
 - [ ] Cognito (user pool and app client)
-- [ ] SSM (the app client secret parameter)
+- [ ] Secrets Manager (the app client secret)
+- [ ] CloudFormation (stacks, change sets, stack policy and termination protection) and the SAM transform, both regions
+- [ ] S3 (objects under the prefix `over-engineered-simple-calculator-webpage/<env>` of the shared artifacts bucket) and SSM read of `/nube-segura/account-addons/artifacts/bucket-name`
 - [ ] SNS (topic, policy and email subscription)
 - [ ] Lambda (function, function URL and resource policy)
 - [ ] IAM (the BFF execution role and its policy)
 - [ ] CloudWatch (log group and alarms)
 - [ ] CloudFront (distribution, origin access controls, response headers policy)
-- [ ] S3 (the web bucket and the Terraform state)
+- [ ] S3 (the web bucket; the Terraform state only while Terraform owns the environment)
 - [ ] ACM (the certificate in us-east-1)
 - [ ] Route 53 (records in the environment's zone)
 
@@ -265,11 +304,23 @@ The design and its known gaps were reviewed before implementation. Summary of th
 | G7 | No CloudFront geographic restriction or standard logging. |
 | G8 | The SNS topic of the BFF alarms is not encrypted with a customer managed key. Decision: no KMS for SNS unless the owner asks for it (about USD 1 per month per environment). |
 | G9 | The BFF execution role has no permissions boundary. No boundary policy exists in the accounts today; consider one in the future if it is created. |
-| G10 | The app client secret is in the Terraform state (encrypted S3 bucket) and in SSM. A lost or leaked secret needs a new app client, whose ID the backends must receive again. No further fix needed at this scale. |
+| G10 | The app client secret is in the Terraform state (encrypted S3 bucket; only for Terraform-owned environments, prod today) and in Secrets Manager; CloudFormation-owned environments (dev) have no state file. A lost or leaked secret needs a new app client, whose ID the backends must receive again. No further fix needed at this scale. |
 
 Closed by the confidential client: the Cognito client ID is public, so before the secret anyone could try passwords directly against Cognito. Now Cognito should refuse `InitiateAuth` for the client without the secret hash, so passwords can only be tried through the BFF (checked in dev after the first deployment, task 6.6; **not yet verified**).
 
 Other facts: the cookie is `HttpOnly`, `Secure`, `SameSite=Strict`, path `/auth`, and its value is validated when it is set and when it is read; the BFF accepts only its own origin (`ALLOWED_ORIGIN` must be `https://<host>` with no path); an unexpected error answers a generic 500 with the request ID and no detail; passwords, tokens, the cookie, the client secret and any hash of it are never logged; the function URL is meant to be callable only through CloudFront (**not yet verified:** the real behavior of the function URL with OAC in a deployed environment). Also **not yet verified**: the Content Security Policy in a browser, and the user pool tier `LITE` against a deployed pool.
+
+## End-to-end test (dev only)
+
+`scripts/e2e/` holds a recorded browser test of the deployed **dev** site: sign in with a test user, session cookie checks, sign out, refusal of the closed session and collection of the BFF logs and alarm states, with a secret guard on every artifact. Prod is refused by every tool. Usage and output: [`scripts/e2e/README.md`](scripts/e2e/README.md).
+
+## Known limits (dated 2026-10-25)
+
+- The email subscription of the dev BFF alerts topic is `PendingConfirmation`: alarm notifications of the BFF are not verified in dev until the address confirms it (the certificate topic is confirmed).
+- The `ec2` repository still holds the Cognito identifiers of the dev environment that existed before spec 006; the other backend repositories got the new dev values. The `websocket` repository has no `dev` GitHub environment, so it cannot receive them.
+- Dev has no backend behind `api.<dev host>` (that hostname belongs to shared-resources and has no service behind it yet), so the calculation step of the e2e test is informational.
+- A dev e2e test user (`test-user-1@example.com`) is kept in the dev pool by owner decision. Delete it with `python scripts/e2e/create_test_user.py --delete`.
+- Prod has no CloudFormation stack and the prod rehearsal (`--parameters-env prod --review-only`) was not run: both wait for B003.
 
 ## Migrating from the ECS repository
 
@@ -277,12 +328,12 @@ The frontend used to live in `over-engineered-simple-calculator-aws-ecs-version`
 
 ## Destroying the dev environment
 
-The manual workflow **Destroy DEV** (`.github/workflows/destroy-dev.yml`) tears down this repository's `dev` environment. There are no approvers (single-user organization), so the safety is inside the workflow:
+The manual workflow **Destroy DEV** (`.github/workflows/destroy-dev.yml`) tears down this repository's `dev` environment with the tool that owns it (found by `iac_owner_guard.py detect`: `cfn_deploy.py destroy` for CloudFormation, Terragrunt for Terraform), then checks for leftovers (`scripts/post_destroy_check.py`). There are no approvers (single-user organization), so the safety is inside the workflow:
 
 1. Run it from the `develop` branch (Actions, Destroy DEV, Run workflow). The default mode is **plan**: it lists what would be destroyed and touches nothing.
 2. Read the summary of the run. To destroy, run it again with mode **destroy** and type the name of this repository in `confirm`.
 3. It uses the `dev` GitHub environment and the dev AWS account only; the account is verified before anything runs. There is no destroy workflow for `prod`.
 
-Teardown order across the repositories: the backends (`ecs`, `sls`) first, then the web page (`webpage`), then `shared-resources` (certificate and DNS of the API). The Terraform state bucket and the GitHub variables and secrets are not removed.
+Teardown order across the repositories: the backends (`ecs`, `sls`) first, then the web page (`webpage`), then `shared-resources` (certificate and DNS of the API). The Terraform state bucket and the GitHub variables and secrets are not removed. A destroyed environment can leave CloudFront items that cannot be tagged (origin access controls, response headers policy) and the leftover check does not cover them yet (known limit, 2026-10-25): check by hand before redeploying.
 
 Notes: the user pool is deleted with its users (the run prints how many as a notice before planning); CloudFront takes several minutes to delete.

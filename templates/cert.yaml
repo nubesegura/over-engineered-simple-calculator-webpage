@@ -121,7 +121,7 @@ Resources:
       Statistic: Minimum
       Period: 86400
       EvaluationPeriods: 1
-      ComparisonOperator: LessThanThreshold
+      ComparisonOperator: LessThanOrEqualToThreshold
       Threshold: 30
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertsTopic]
@@ -140,7 +140,7 @@ Resources:
       Statistic: Minimum
       Period: 86400
       EvaluationPeriods: 1
-      ComparisonOperator: LessThanThreshold
+      ComparisonOperator: LessThanOrEqualToThreshold
       Threshold: 7
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertsTopic]

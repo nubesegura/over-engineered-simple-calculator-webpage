@@ -12,16 +12,20 @@ src/auth_bff/                  BFF Lambda
     domain/                    errors.py (taxonomy), session.py (tokens, outcome, cookie action)
     application/               ports.py (IdentityProvider and SecretReader ports), use_cases.py (Login, Refresh, Logout)
     adapters/inbound/          function_url.py (routing, validation), cookies.py, responses.py
-    adapters/outbound/         cognito_identity_provider.py, ssm_secret_reader.py
+    adapters/outbound/         cognito_identity_provider.py, secrets_manager_secret_reader.py
     config/                    settings.py, container.py (composition root), logging.py
   tests/                       unit/, adapters/, entrypoints/, fakes.py
-modules/auth/                  Cognito user pool, confidential app client, SSM parameter with the client secret
+modules/auth/                  Cognito user pool, confidential app client, Secrets Manager secret with the client secret
 modules/auth-bff/              Lambda, function URL, role, log group, SNS topic, alarms
 modules/frontend/              S3, CloudFront (two origins), response headers policy, ACM, Route 53, Lambda permissions
 environments/                  root.hcl, common/*.hcl, <env>/env.hcl, <env>/edge/{auth,auth-bff,frontend}
+templates/                     CloudFormation/SAM: auth.yaml, cert.yaml, auth-bff.yaml, frontend.yaml, stacks.json, stack-policy-prod.json
+parameters/, samconfig.toml    dev.json and prod.json values and tags; SAM build and package settings
+scripts/                       cfn_deploy.py, iac_owner_guard.py, iac_inventory.py, iac_common.py, post_destroy_check.py, tests/
+scripts/e2e/                   Recorded browser test of the deployed dev site (dev only)
 ```
 
-Layers of the BFF (enforced by import-linter): `config -> adapters -> application -> domain`. Domain and application must not import `boto3` or `botocore` (the SSM read goes through the `SecretReader` port); inbound adapters must not import outbound adapters.
+Layers of the BFF (enforced by import-linter): `config -> adapters -> application -> domain`. Domain and application must not import `boto3` or `botocore` (the secret read goes through the `SecretReader` port); inbound adapters must not import outbound adapters.
 
 ## BFF endpoints
 
@@ -145,8 +149,8 @@ Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval
 
 - User pool `cgnp-useast2-oecalc-<env>`: tier `LITE` (**not yet verified** against a deployed pool; the code comment says the same), email is the username, only administrators create users, password minimum length 12 with lowercase, uppercase, number and symbol, temporary password validity 7 days, MFA off, account recovery by administrator only, no advanced security, no identity pool, no hosted UI or domain. Deletion protection `ACTIVE` in prod, `INACTIVE` in dev.
 - App client `cgnc-useast2-oecalc-<env>`: **confidential** (`generate_secret = true`); flows `ALLOW_USER_PASSWORD_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH` only; refresh token 24 hours, access and ID tokens 1 hour (units set explicitly); token revocation on; user existence errors hidden; no OAuth flows; refresh token rotation off.
-- SSM parameter `/<context>/<env>/auth/app-client-secret`: `SecureString`, standard tier, AWS managed key (`alias/aws/ssm`), value is the client secret.
-- Outputs: `user_pool_id`, `user_pool_arn`, `issuer_url`, `app_client_id`, `app_client_secret_parameter_name`, `app_client_secret_parameter_arn`. The secret itself is never an output.
+- Secrets Manager secret `sm-useast2-oecalc-auth-app-client-<env>`: AWS managed key (the `aws/secretsmanager` alias), no rotation, resource policy that denies non-TLS access, public policies blocked, value is the client secret (Terraform: recovery window 0 days in dev, 30 in prod; CloudFormation has no such property).
+- Terraform outputs: `user_pool_id`, `user_pool_arn`, `issuer_url`, `app_client_id` and `app_client_secret_name` and `app_client_secret_arn`. The secret value is never an output.
 - The ID token is the bearer; backends check issuer, audience (the app client ID), `token_use=id` and expiry.
 
 ## Confidential app client
@@ -165,9 +169,9 @@ The Cognito client stays unsigned (`UNSIGNED`): the secret, not AWS credentials,
 
 Where the secret lives and how the BFF gets it:
 
-1. Cognito generates it when the client is created; Terraform stores it in the SSM parameter above. It is also in the Terraform state in clear text (a known provider limitation, gap G10); the state bucket must stay encrypted with restricted access.
-2. The function receives only the parameter name in `CLIENT_SECRET_PARAMETER_NAME`.
-3. At cold start the BFF reads the parameter once (`ssm:GetParameter` with decryption, through the `SecretReader` port and the SSM adapter) and keeps the value in memory. A missing or unreadable parameter makes the function fail at cold start.
+1. Cognito generates it when the client is created; the IaC tool stores it in the Secrets Manager secret above (CloudFormation takes it from the client attribute, Terraform from the client resource). With Terraform it is also in the state in clear text (a known provider limitation, gap G10); the state bucket must stay encrypted with restricted access. CloudFormation has no state file.
+2. The function receives only the secret name in `CLIENT_SECRET_ID`.
+3. At cold start the BFF reads the secret once (`secretsmanager:GetSecretValue`, through the `SecretReader` port and the Secrets Manager adapter) and keeps the value in memory. A missing or unreadable secret makes the function fail at cold start.
 4. The secret and the hashes derived from it are never logged, never put in an error and never returned.
 
 Consequences to plan for:
@@ -184,7 +188,7 @@ The permissions live in `modules/frontend` (they need the distribution ARN), eac
 - `lambda:InvokeFunctionUrl` with `function_url_auth_type = AWS_IAM`
 - `lambda:InvokeFunction` with `invoked_via_function_url = true` (a function URL now requires both)
 
-Execution role `iamr-useast2-oecalc-auth-bff-<env>`: `logs:CreateLogStream` and `logs:PutLogEvents` on its own log group only; `ssm:GetParameter` on the single parameter that holds the app client secret (the AWS managed key needs no `kms` statement); `xray:PutTraceSegments` and `xray:PutTelemetryRecords` only when tracing is active (prod). No Cognito, S3, Secrets Manager or `kms` action. No permissions boundary (gap G9).
+Execution role `iamr-useast2-oecalc-auth-bff-<env>`: `logs:CreateLogStream` and `logs:PutLogEvents` on its own log group only; `secretsmanager:GetSecretValue` on the single secret that holds the app client secret (the AWS managed key needs no `kms` statement); `xray:PutTraceSegments` and `xray:PutTelemetryRecords` only when tracing is active (prod). No Cognito, S3, SSM or `kms` action. No permissions boundary (gap G9).
 
 ## Function configuration
 
@@ -193,16 +197,16 @@ Function `fnc-useast2-oecalc-auth-bff-<env>`: `python3.14`, `arm64`, 256 MB, 10 
 | Environment variable | Required | Meaning |
 |---|---|---|
 | `COGNITO_APP_CLIENT_ID` | yes | App client ID (from the auth unit; public, not a secret) |
-| `CLIENT_SECRET_PARAMETER_NAME` | yes | Name of the SSM parameter with the client secret (a name, not the secret) |
+| `CLIENT_SECRET_ID` | yes | Name of the Secrets Manager secret with the client secret (a name, not the secret) |
 | `ALLOWED_ORIGIN` | yes | `https://<web domain>`; no path, no trailing slash (validated at cold start) |
 | `AWS_REGION` | yes | Set by the Lambda runtime; used for the Cognito client |
 | `ENVIRONMENT` | no | Only the value `local` allows local defaults; never set in a deployed function |
 
 A missing variable or an invalid `ALLOWED_ORIGIN` raises `ConfigurationError` at cold start (no silent defaults).
 
-Cognito client: `boto3` `cognito-idp`, signature `UNSIGNED`, connect timeout 2 s, read timeout 5 s, at most 2 attempts in total. Operations: `InitiateAuth` (`USER_PASSWORD_AUTH`), `GetTokensFromRefreshToken` and `RevokeToken`. SSM client: signed with the function role, connect timeout 2 s, read timeout 5 s, standard retries.
+Cognito client: `boto3` `cognito-idp`, signature `UNSIGNED`, connect timeout 2 s, read timeout 5 s, at most 2 attempts in total. Operations: `InitiateAuth` (`USER_PASSWORD_AUTH`), `GetTokensFromRefreshToken` and `RevokeToken`. Secrets Manager client: signed with the function role, connect timeout 2 s, read timeout 5 s, standard retries.
 
-Terraform variables of the module (all validated): `context`, `env_type`, `source_dir`, `app_client_id`, `client_secret_parameter_name`, `client_secret_parameter_arn`, `allowed_origin`, `log_retention_days` (30 dev, 365 prod), `tracing_mode` (`PassThrough` dev, `Active` prod), `alert_email`. Outputs: `function_name`, `function_url_domain`.
+Terraform variables of the module (all validated): `context`, `env_type`, `source_dir`, `app_client_id`, `client_secret_name`, `client_secret_arn`, `allowed_origin`, `log_retention_days` (30 dev, 365 prod), `tracing_mode` (`PassThrough` dev, `Active` prod), `alert_email`. Outputs: `function_name`, `function_url_domain`.
 
 ## Logging
 
@@ -225,7 +229,45 @@ One JSON line per request with `endpoint`, `status`, `outcome` (`ok` or the erro
 
 Dependabot (`.github/dependabot.yml`, weekly): `pub` (`/src/calculator_app`), `pip` (`/src/auth_bff`), `github-actions` and `terraform` (`/modules/*`).
 
-`deploy.yml` adds: environment validation (secrets `ROLE_ARN`, `AWS_ACCOUNT_ID`, `SUPPORT_EMAIL`, variables `AWS_REGION`, `ROUTE53_ZONE_ID`, and `WAF_WEB_ACL_ARN` in prod), branch check, OIDC login, account check, plan, apply, the Cognito hand-off summary, build, publish, the page smoke test and the BFF smoke test. The Flutter build adds `--dart-define=API_BASE_URL=<value>` only when the GitHub variable `API_BASE_URL` is set.
+- CloudFormation and scripts (every run, whatever `IAC_TOOL` is): job `cloudformation-lint` (`cfn-lint`, `sam validate --lint`, `checkov` over `templates/`) and job `scripts` (`ruff`, `ruff format --check`, `mypy` strict and `pytest` over `scripts/`, which includes the offline tests of the e2e tools; no browser, AWS or network).
+
+`deploy.yml` adds: validation of `IAC_TOOL`, environment validation (secrets `ROLE_ARN`, `AWS_ACCOUNT_ID`, `SUPPORT_EMAIL`, variables `AWS_REGION`, `ROUTE53_ZONE_ID`, and `WAF_WEB_ACL_ARN` in prod), branch check, OIDC login, account check, the owner guard, then the Terraform path (plan, apply) or the CloudFormation path (`cfn_deploy.py deploy`), the Cognito hand-off summary, build, publish, the page smoke test and the BFF smoke test. The job has a 90 minute timeout and the concurrency group `deploy-<env>`, shared with Destroy DEV. The Flutter build adds `--dart-define=API_BASE_URL=<value>` only when the GitHub variable `API_BASE_URL` is set.
+
+## CloudFormation/SAM path and IAC_TOOL (spec 006)
+
+Decision record: [ADR 0008](adr/0008-dual-iac-terraform-and-cloudformation.md). Templates, stacks and deploy order: `templates/README.md` and the CloudFormation section of [architecture.md](architecture.md).
+
+- **Switch.** `IAC_TOOL` (GitHub environment variable) is `cloudformation` when unset or empty, or `terraform`; any other value fails first. The same value is read by `scripts/iac_owner_guard.py`.
+- **Owner guard** (`iac_owner_guard.py check|detect`): CloudFormation owns an environment when any stack of `templates/stacks.json` exists in either region in any state except `DELETE_COMPLETE`; Terraform owns it when a state object of a Terragrunt unit exists with at least one resource (read in memory, never written or printed). Exit codes of `check`: 0 free or owned by the tool, 2 owned by the other tool, 3 both, 4 not determined (access denied, throttling, malformed answer; fail closed). `detect` prints `owner=terraform|cloudformation|none|both` and is what Destroy DEV uses.
+- **Change-set guard** (`cfn_deploy.py`): a change set is executed only if every change is `Add`, or a `Modify` whose `Replacement` is explicitly `False`; everything else (replacement `True` or `Conditional`, missing, `Remove`, `Import`, unknown) is refused and the change set deleted. The allow-list of exceptions is empty. Change sets are read through all pages. The status of each stack is checked first: only stable states deploy; `ROLLBACK_*`, `DELETE_FAILED` and `*_IN_PROGRESS` are refused, and only dev may delete a `ROLLBACK_COMPLETE` stack (`--recover-rollback`). `--disable-rollback` is never used.
+- **Checks around the deploy.** The certificate ARN of the web stack must be issued for the environment host; the deployed function `CodeSha256` must equal the uploaded zip; the artifacts bucket name comes from the SSM parameter `/nube-segura/account-addons/artifacts/bucket-name` (a missing parameter stops the deploy; `resolve_s3` is not used).
+- **Prod settings.** Termination protection and the stack policy `templates/stack-policy-prod.json` (deny `Update:Replace` and `Update:Delete` on the user pool, app client, secret, distribution and web bucket) are set on prod stacks, and a read-only drift report runs on prod deploys. These code paths exist but have never run, because no prod stack exists (see below).
+- **Environment values.** Templates hold no environment name or account; values and the five mandatory tags are in `parameters/<env>.json` (same keys in both files, checked by `scripts/tests/test_parameters.py`).
+
+### Runbook
+
+1. **Normal deploy:** push to `develop` (dev). Do not run `cfn_deploy.py deploy` by hand for prod.
+2. **Review without changing anything:** `python scripts/cfn_deploy.py deploy --env dev --review-only` creates the change sets, prints them and executes nothing. `--parameters-env prod` combined with it uses the prod values against the dev account, but it stops at the host check of the dev hosted zone (the dev zone does not contain the prod host), so the prod rehearsal is not available that way; it moves to B003.
+3. **Local runs outside the guard** need the AWS credentials of the environment's account, the same variables as the workflow (`ROUTE53_ZONE_ID`, `SUPPORT_EMAIL`, optionally `WAF_WEB_ACL_ARN`) and the SAM CLI on the PATH. Run `python scripts/iac_owner_guard.py check --env dev` first.
+4. **Dev stack left in `ROLLBACK_COMPLETE`:** the Deploy DEV workflow passes `--recover-rollback` for dev and deletes the stack before creating it again. For other failed states, fix the cause by hand.
+5. **A replacement is needed** (a change the guard refuses): the stack-policy override was removed on purpose. Create the change set by hand, review it and execute it only with the owner's separate authorization.
+6. **Destroy dev:** workflow Destroy DEV (plan first, then destroy with the repository name typed). It deletes the stacks in reverse order, force-deletes a secret pending deletion, and runs `post_destroy_check.py`.
+7. **After a destroy and before a new deploy** check by hand for CloudFront origin access controls and the response headers policy of the old environment: they cannot be tagged, so the leftover check does not see them yet (see known limits).
+
+## End-to-end test
+
+`scripts/e2e/` (dev only; prod is refused): `create_test_user.py` (CHANGES AWS: Cognito `admin-create-user`, needs the owner's authorization), `web_driver.py --record` (Playwright, headed Chromium and screen recording) and `collect_logs.py` (read-only BFF logs and alarm states). Artifacts go to `e2e-runs/`, passwords to `.secrets/`; both are git-ignored, and a secret guard checks every artifact. Details: `scripts/e2e/README.md`. The calculation step is informational until a backend answers on `api.<dev host>` (`--require-backend` makes it a failure).
+
+## Known limits (dated 2026-10-25)
+
+- **Prod is still owned by Terraform.** The move to CloudFormation is deferred to backlog item B003 by owner decision. `IAC_TOOL` must be `terraform` in the `prod` GitHub environment before any merge to `main`; otherwise the owner guard stops the prod deploy (exit 2, nothing changed). The prod stack policy, termination protection and the prod rehearsal have not been exercised; the add-ons artifacts bucket does not exist in the prod account.
+- **BFF alerts topic subscription is `PendingConfirmation` in dev** (checked 2026-10-24): the BFF alarms exist and are in OK state, but delivery of their notifications is not verified until the address confirms the email. The certificate topic is confirmed.
+- **Cognito identifiers in other repositories.** After the dev environment was recreated, `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID` of `dev` were updated in the `ecs`, `eks`, `sls` and `shared-resources` repositories. The `ec2` repository still holds the old values. The `websocket` repository has no `dev` environment.
+- **No backend behind `api.<dev host>`** in dev (the hostname is owned by shared-resources), so the calculation check of the e2e test is informational.
+- **Dev e2e test user.** `test-user-1@example.com` exists in the dev pool by owner decision; delete it with `python scripts/e2e/create_test_user.py --delete`.
+- **Leftover check gap.** `post_destroy_check.py` finds secrets pending deletion but not CloudFront origin access controls or response headers policies left by an earlier environment.
+- **Alarm operator.** Both tools use `LessThanThreshold` for the certificate expiry alarms; the reference text says `LessThanOrEqualToThreshold`. Owner decision pending.
+- **Add-ons repository.** The artifacts bucket template lives in `nube-segura-account-addons`; its deploy workflow and the use of SAM or `cloudformation deploy` there are decided in that repository.
 
 ## Page: the API address and where the bearer token is sent
 

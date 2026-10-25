@@ -11,6 +11,8 @@
    both Regions of the stacks (us-east-2 and us-east-1), found by naming convention and filtered by the
    repo-name tag. A secret scheduled for deletion is an expected residue unless --strict-secrets is given
    (the CloudFormation destroy force-deletes it, because a pending secret keeps its name).
+5. CloudFront origin access controls (oac-*) and custom response headers policies (rhp-*) of the project, found by
+   naming convention (they carry no tags); read once because CloudFront is global.
 
 Usage: python scripts/post_destroy_check.py --repo-name <repository> --env dev [--profile P]
            [--region us-east-2 --region us-east-1] [--context oecalc] [--strict-secrets]
@@ -277,6 +279,20 @@ def collect_region(
                 if ours(tags):
                     left.append(("log group", f"{name} [{region}]"))
 
+    def cloudfront_origin_access_controls() -> None:
+        listed = aws(["cloudfront", "list-origin-access-controls"], a.profile, region)
+        for item in listed.get("OriginAccessControlList", {}).get("Items", []):
+            if item["Name"].startswith("oac-") and mine(item["Name"]):
+                left.append(("cloudfront origin access control", f"{item['Name']} ({item['Id']})"))
+
+    def cloudfront_response_headers_policies() -> None:
+        listed = aws(["cloudfront", "list-response-headers-policies", "--type", "custom"], a.profile, region)
+        for item in listed.get("ResponseHeadersPolicyList", {}).get("Items", []):
+            policy = item["ResponseHeadersPolicy"]
+            name = policy["ResponseHeadersPolicyConfig"]["Name"]
+            if name.startswith("rhp-") and mine(name):
+                left.append(("cloudfront response headers policy", f"{name} ({policy['Id']})"))
+
     checks: list[tuple[str, Callable[[], None]]] = [
         ("scheduler", schedules),
         ("ecs task definitions", task_definitions),
@@ -287,6 +303,9 @@ def collect_region(
     ]
     if first:
         checks.insert(2, ("iam roles", iam_roles))
+        # CloudFront is a global service: read once. Names follow oac-/rhp-<region>-<context>-...-<env>.
+        checks.append(("cloudfront origin access controls", cloudfront_origin_access_controls))
+        checks.append(("cloudfront response headers policies", cloudfront_response_headers_policies))
     for name, fn in checks:
         optional(f"{name} [{region}]", fn)
 

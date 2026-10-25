@@ -162,3 +162,52 @@ def test_missing_permission_on_an_optional_check_is_reported_as_skipped(
     assert run(monkeypatch, cli) == 0
     out = capsys.readouterr().out
     assert "SKIPPED" in out and "sns" in out
+
+
+def oac_list(*names: str) -> dict[str, Any]:
+    return {"OriginAccessControlList": {"Items": [{"Id": f"E{i}", "Name": n} for i, n in enumerate(names)]}}
+
+
+def rhp_list(*names: str) -> dict[str, Any]:
+    items = [
+        {"Type": "custom", "ResponseHeadersPolicy": {"Id": f"P{i}", "ResponseHeadersPolicyConfig": {"Name": n}}}
+        for i, n in enumerate(names)
+    ]
+    return {"ResponseHeadersPolicyList": {"Items": items}}
+
+
+def test_cloudfront_oac_and_response_headers_policy_are_left_over(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = FakeCli(
+        {
+            ("cloudfront", "list-origin-access-controls", EAST2): oac_list(
+                "oac-useast2-oecalc-web-dev", "oac-useast2-oecalc-auth-bff-dev", "oac-useast2-oecalc-web-prod", "other"
+            ),
+            ("cloudfront", "list-response-headers-policies", EAST2): rhp_list(
+                "rhp-useast2-oecalc-web-dev", "rhp-useast2-oecalc-web-prod", "rhp-other-dev"
+            ),
+        }
+    )
+    assert run(monkeypatch, cli) == 1
+    out = capsys.readouterr().out
+    assert out.count("- cloudfront origin access control:") == 2
+    assert "cloudfront response headers policy: rhp-useast2-oecalc-web-dev" in out
+    assert "prod" not in out.split("LEFT OVER")[1].split("Expected")[0]
+
+
+def test_cloudfront_is_global_and_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = FakeCli()
+    assert run(monkeypatch, cli) == 0
+    assert sum(1 for s, c, _ in cli.calls if s == "cloudfront" and c == "list-origin-access-controls") == 1
+    assert sum(1 for s, c, _ in cli.calls if s == "cloudfront" and c == "list-response-headers-policies") == 1
+
+
+def test_cloudfront_empty_lists_are_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = FakeCli(
+        {
+            ("cloudfront", "list-origin-access-controls", EAST2): {"OriginAccessControlList": {"Quantity": 0}},
+            ("cloudfront", "list-response-headers-policies", EAST2): {"ResponseHeadersPolicyList": {"Quantity": 0}},
+        }
+    )
+    assert run(monkeypatch, cli) == 0

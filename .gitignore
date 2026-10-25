@@ -63,3 +63,7 @@ modules/auth-bff/build/
 
 # module-level lock files created by local terraform init (tracked ones live in environments/)
 modules/**/.terraform.lock.hcl
+
+# Local test-user credentials and e2e runs
+.secrets/
+e2e-runs/

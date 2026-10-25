@@ -77,7 +77,7 @@ resource "aws_cloudwatch_metric_alarm" "certificate_expiry" {
   statistic           = "Minimum"
   period              = 86400
   evaluation_periods  = 1
-  comparison_operator = "LessThanThreshold"
+  comparison_operator = "LessThanOrEqualToThreshold"
   threshold           = tonumber(each.value)
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
