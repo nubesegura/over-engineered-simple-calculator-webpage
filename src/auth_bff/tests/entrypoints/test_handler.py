@@ -278,3 +278,26 @@ def test_no_log_line_or_error_holds_the_client_secret_or_the_hash(
     visible = caplog.text + json.dumps(responses)
     assert CLIENT_SECRET not in visible
     assert _secret_hash(USERNAME) not in visible
+
+
+def test_a_refresh_token_of_another_client_is_an_expired_session_and_is_never_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    foreign_token = "token-issued-to-another-client"
+    cognito = fake_credentials_client("cognito-idp")
+    with Stubber(cognito) as stubber:
+        stubber.add_client_error("get_tokens_from_refresh_token", "NotAuthorizedException")
+        container = build_container(
+            ENVIRONMENT, CognitoIdentityProvider(cognito, "client-id", CLIENT_SECRET)
+        )
+        caplog.set_level(logging.DEBUG)
+
+        response = container.function_url.handle(
+            _event("/auth/refresh", cookies=[f"__Secure-oecalc-refresh={foreign_token}"]), "r1"
+        )
+
+    assert response["statusCode"] == 401
+    assert json.loads(response["body"])["error"]["code"] == "session_expired"
+    assert len(response["cookies"]) == 1 and "Max-Age=0" in response["cookies"][0]
+    assert foreign_token not in caplog.text
+    assert foreign_token not in response["body"]

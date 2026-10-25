@@ -18,6 +18,11 @@ output "app_client_id" {
   value       = aws_cognito_user_pool_client.this.id
 }
 
+output "public_app_client_id" {
+  description = "ID of the public app client (hand-off value COGNITO_PUBLIC_APP_CLIENT_ID; not a secret)"
+  value       = aws_cognito_user_pool_client.public.id
+}
+
 output "app_client_secret_name" {
   description = "Name of the Secrets Manager secret that holds the app client secret (a name, not the secret)"
   value       = aws_secretsmanager_secret.app_client_secret.name

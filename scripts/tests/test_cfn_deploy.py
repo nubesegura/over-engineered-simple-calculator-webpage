@@ -25,6 +25,7 @@ ZIP_SHA = base64.b64encode(hashlib.sha256(ZIP_BYTES).digest()).decode()
 PACKAGED = f"Resources:\n  F:\n    Properties:\n      CodeUri: s3://{BUCKET}/prefix/abc\n"
 POOL = "us-east-2_FAKEPOOL"
 CLIENT = "fakeclientid"
+PUBLIC_CLIENT = "fakepublicclientid"
 CERT_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/fake"
 
 
@@ -142,6 +143,7 @@ class World:
             f"stk-useast2-oecalc-auth-{suffix}": {
                 "UserPoolId": POOL,
                 "AppClientId": CLIENT,
+                "PublicAppClientId": PUBLIC_CLIENT,
                 "AppClientSecretName": f"sm-useast2-oecalc-auth-app-client-{suffix}",
                 "AppClientSecretArn": "arn:aws:secretsmanager:us-east-2:000000000000:secret:fake",
             },
@@ -284,7 +286,21 @@ def test_deploy_runs_the_four_stacks_in_order_and_prints_the_summary(
     out = capsys.readouterr().out
     assert f"COGNITO_USER_POOL_ID={POOL}" in out
     assert f"COGNITO_APP_CLIENT_ID={CLIENT}" in out
+    assert f"COGNITO_PUBLIC_APP_CLIENT_ID={PUBLIC_CLIENT}" in out
+    assert CLIENT != PUBLIC_CLIENT
+    lines = out.splitlines()
+    assert lines[-3:] == [
+        f"COGNITO_USER_POOL_ID={POOL}",
+        f"COGNITO_APP_CLIENT_ID={CLIENT}",
+        f"COGNITO_PUBLIC_APP_CLIENT_ID={PUBLIC_CLIENT}",
+    ]
     assert EMAIL not in out and ZONE not in out
+
+
+def test_summary_fails_naming_the_output_when_the_public_client_output_is_missing(world: World) -> None:
+    del world.east2.outputs_on_create[world.stack("auth")]["PublicAppClientId"]
+    with pytest.raises(cfn_deploy.DeployError, match="PublicAppClientId"):
+        world.deployer().deploy()
 
 
 def test_change_sets_carry_tags_capabilities_and_no_disable_rollback(world: World) -> None:
@@ -530,7 +546,7 @@ def test_stack_policy_file_denies_replace_and_delete_of_the_critical_resources()
     assert set(deny["Action"]) == {"Update:Replace", "Update:Delete"}
     assert set(deny["Resource"]) == {
         f"LogicalResourceId/{name}"
-        for name in ("UserPool", "AppClient", "AppClientSecret", "Distribution", "WebBucket")
+        for name in ("UserPool", "AppClient", "PublicAppClient", "AppClientSecret", "Distribution", "WebBucket")
     }
 
 

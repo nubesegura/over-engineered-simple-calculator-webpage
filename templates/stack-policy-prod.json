@@ -16,6 +16,7 @@
         "LogicalResourceId/UserPool",
         "LogicalResourceId/AppClient",
         "LogicalResourceId/AppClientSecret",
+        "LogicalResourceId/PublicAppClient",
         "LogicalResourceId/Distribution",
         "LogicalResourceId/WebBucket"
       ]

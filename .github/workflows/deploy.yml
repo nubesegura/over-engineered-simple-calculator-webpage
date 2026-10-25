@@ -209,7 +209,9 @@ jobs:
       # ---- both paths --------------------------------------------------------------
       # The backends (sls, ecs) trust this environment's user pool. The owner copies these
       # two values by hand into the GitHub environment variables of the same name in each
-      # backend repository. They are identifiers, not secrets.
+      # backend repository. A third value, the public app client (no secret), is for
+      # command-line tools and end-to-end tests only (websocket repository); it is never
+      # for the BFF or the backends. All three are identifiers, not secrets.
       - name: Hand-off values for the backends
         env:
           TARGET: ${{ inputs.environment }}
@@ -218,11 +220,13 @@ jobs:
             cd "environments/$TARGET/edge/auth"
             POOL_ID=$(terragrunt output -raw user_pool_id)
             CLIENT_ID=$(terragrunt output -raw app_client_id)
+            PUBLIC_CLIENT_ID=$(terragrunt output -raw public_app_client_id)
           else
             POOL_ID=$(sed -n 's/^COGNITO_USER_POOL_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
             CLIENT_ID=$(sed -n 's/^COGNITO_APP_CLIENT_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+            PUBLIC_CLIENT_ID=$(sed -n 's/^COGNITO_PUBLIC_APP_CLIENT_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
           fi
-          if [ -z "$POOL_ID" ] || [ -z "$CLIENT_ID" ]; then
+          if [ -z "$POOL_ID" ] || [ -z "$CLIENT_ID" ] || [ -z "$PUBLIC_CLIENT_ID" ]; then
             echo "::error::The Cognito identifiers could not be read from the deployment"
             exit 1
           fi
@@ -235,7 +239,13 @@ jobs:
             echo "COGNITO_USER_POOL_ID=$POOL_ID"
             echo "COGNITO_APP_CLIENT_ID=$CLIENT_ID"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo
+            echo "Public app client (no secret). Only for command-line tools and end-to-end tests (websocket repository). Never for the BFF or the backends:"
+            echo
+            echo '```'
+            echo "COGNITO_PUBLIC_APP_CLIENT_ID=$PUBLIC_CLIENT_ID"
+            echo '```'
+          }>> "$GITHUB_STEP_SUMMARY"
 
       # The app is identical in every environment: the API address is derived from the
       # host of the page (optional override: variable API_BASE_URL) and the user logs in

@@ -18,7 +18,8 @@ deploy     Required variables (names only are validated, values are never printe
            SUPPORT_EMAIL, and for prod also WAF_WEB_ACL_ARN. GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT name the
            change sets. Parameters come from parameters/<env>.json, the stack tags, those variables and the
            outputs of the producer stacks (read in the producer's Region right before the consumer's change
-           set). At the end it prints COGNITO_USER_POOL_ID and COGNITO_APP_CLIENT_ID.
+           set). At the end it prints COGNITO_USER_POOL_ID, COGNITO_APP_CLIENT_ID and
+           COGNITO_PUBLIC_APP_CLIENT_ID (the public client, no secret).
            Change-set guard: Add is allowed; Modify only when Replacement is False; Remove, Import,
            Dynamic and anything unknown are refused; the allow-list of exceptions is empty. A refused change
            set is printed in full and deleted. Stacks in ROLLBACK_*, DELETE_FAILED, *_IN_PROGRESS and
@@ -731,9 +732,12 @@ class Deployer:
 
     def print_summary(self) -> None:
         auth = self.outputs(self.entry_of("auth"))
+        if "PublicAppClientId" not in auth:
+            raise DeployError("the auth stack has no output PublicAppClientId")
         print("Deploy summary (identifiers only, no secret values):")
         print(f"COGNITO_USER_POOL_ID={auth['UserPoolId']}")
         print(f"COGNITO_APP_CLIENT_ID={auth['AppClientId']}")
+        print(f"COGNITO_PUBLIC_APP_CLIENT_ID={auth['PublicAppClientId']}")
 
     # -- destroy (dev only) -------------------------------------------------
     def empty_bucket(self, bucket: str) -> int:

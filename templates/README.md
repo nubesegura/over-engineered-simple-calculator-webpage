@@ -10,7 +10,7 @@ environment at a time (owner guard, milestone 2 of spec 006). The GitHub variabl
 
 ```
 templates/stacks.json      stacks per environment in deploy order, with region and SAM flag (read by the scripts)
-templates/auth.yaml        Cognito user pool, app client, client secret in Secrets Manager (us-east-2)
+templates/auth.yaml        Cognito user pool, confidential app client, public app client (no secret), client secret in Secrets Manager (us-east-2)
 templates/cert.yaml        ACM certificate, web alert topic, two expiry alarms (us-east-1 only)
 templates/auth-bff.yaml    SAM: BFF function, function URL, role, log group, alert topic, alarms (us-east-2)
 templates/frontend.yaml    web bucket, OACs, headers policy, distribution, invoke permissions, A/AAAA records (us-east-2)
@@ -30,7 +30,7 @@ everywhere (parity; prod is protected by pool deletion protection, termination p
 
 | # | Stack (dev; prod uses `-prod`) | Region | Template | Inputs from other stacks (passed by the deploy script) |
 |---|---|---|---|---|
-| 1 | `stk-useast2-oecalc-auth-dev` | us-east-2 | `auth.yaml` | none |
+| 1 | `stk-useast2-oecalc-auth-dev` | us-east-2 | `auth.yaml` (outputs include `AppClientId` and `PublicAppClientId`, the hand-off value `COGNITO_PUBLIC_APP_CLIENT_ID`; not a secret, not used by the BFF) | none |
 | 2 | `stk-useast1-oecalc-cert-dev` | us-east-1 | `cert.yaml` | none |
 | 3 | `stk-useast2-oecalc-auth-bff-dev` | us-east-2 | `auth-bff.yaml` (SAM) | `AppClientId`, `ClientSecretName`, `ClientSecretArn` (auth) |
 | 4 | `stk-useast2-oecalc-frontend-dev` | us-east-2 | `frontend.yaml` | `BffFunctionName`, `BffFunctionUrlHost` (auth-bff), `CertificateArn` (cert) |
