@@ -40,7 +40,7 @@ def lane_top(k: int) -> int:
     return TOP + LANE_H * k
 
 
-W, H = LANE_X + LANE_W + 40, 1760
+W, H = LANE_X + LANE_W + 40, 1790
 d = Diagram("Web page layers", W, H)
 
 TIERS = [
@@ -105,13 +105,14 @@ def box(cid: str, col: int, lane: int, kind: str, title: str, sub: str = "") -> 
 
 # client
 box("users", 2, 0, "plain", "Users", "Flutter Web page in the browser")
+box("cli", 5, 0, "plain", "Websocket CLI and e2e", "other repository, public client ID")
 box("owner", 6, 0, "plain", "Owner", "email alerts, creates users")
 # edge and identity
 box("waf", 0, 1, "external", "Shared WAF web ACL", "prod only, by ARN, not in this repo")
 box("r53", 1, 1, "edge", "Route 53", "A and AAAA alias records")
 box("cf", 2, 1, "edge", "CloudFront", "OAC, TLS 1.2+, HSTS and CSP")
 box("acm", 3, 1, "edge", "ACM certificate", "us-east-1, DNS validated")
-box("cog", 5, 1, "edge", "Cognito user pool", "local users, confidential app client")
+box("cog", 5, 1, "edge", "Cognito user pool", "confidential client (BFF), public client (CLI)")
 # api
 box("url", 4, 2, "api", "BFF function URL", "/auth/* only, AWS_IAM, signed by CloudFront")
 box("backends", 7, 2, "external", "Backends sls and ecs", "other repositories, /api/v1")
@@ -151,18 +152,19 @@ d.edge("bff", "alarms", (1, 0.75), (0.3, 0), [(col_x(6) + 63, y_bff_lo)], num=10
 d.edge("alarms", "owner", (0.7, 0), (0.7, 1), num=11, dashed=True, lp=0.6)
 d.edge("gh", "cfn", (1, 0.5), (0, 0.5), num=12)
 d.edge("gh", "tf", (0.4, 1), V, [(col_x(0) + 84, p1), (col_cx(2), p1)], num=13, lp=0.3)
+d.edge("cli", "cog", V, N, num=15)
 d.edge("gh", "art", (0.7, 1), V, [(col_x(0) + 147, p2), (col_cx(3), p2)], num=14, lp=0.5)
 
 # ---- legend and notes --------------------------------------------------------------------------------
 LEG_Y = lane_top(6) + 40
-d.box("legend", 20, LEG_Y, LANE_W, 200, "", fill="#ffffff", stroke="#232F3E", sw=1, arc=0)
+d.box("legend", 20, LEG_Y, LANE_W, 230, "", fill="#ffffff", stroke="#232F3E", sw=1, arc=0)
 half = (LANE_W - 60) // 2
 d.text(
     "legL",
     40,
     LEG_Y + 12,
     half,
-    180,
+    210,
     "<b>Flow legend</b><br>"
     "[1] Users open the page over HTTPS through CloudFront. [2] Route 53 points the domain at CloudFront (DNS). "
     "[3] The us-east-1 certificate serves TLS on the custom domain.<br>"
@@ -173,7 +175,9 @@ d.text(
     "[9] The page calls the backends of other repositories with the ID token. [10] BFF metrics feed the alarms; "
     "[11] both alert topics email the owner.<br>"
     "[12] GitHub Actions deploys with CloudFormation/SAM (default) after the owner guard; [13] with "
-    "IAC_TOOL=terraform it runs Terragrunt; [14] it uploads the BFF package to the shared artifacts bucket.",
+    "IAC_TOOL=terraform it runs Terragrunt; [14] it uploads the BFF package to the shared artifacts bucket.<br>"
+    "[15] The websocket CLI and e2e tests sign in directly at Cognito with the public client (no secret, "
+    "USER_PASSWORD_AUTH and refresh; no CloudFront, BFF or WAF) and call the websocket backend with the ID token.",
     fs=13,
 )
 d.text(
@@ -181,7 +185,7 @@ d.text(
     40 + half + 20,
     LEG_Y + 12,
     half,
-    180,
+    210,
     "<b>Notes</b><br>"
     "One tool owns an environment at a time: dev is CloudFormation-owned (stacks auth, cert, auth-bff, frontend); "
     "prod stays Terraform-owned until backlog B003, and the owner guard stops a CloudFormation deploy there.<br>"
@@ -189,6 +193,7 @@ d.text(
     "a TLS-only resource policy and one reader role.<br>"
     "No VPC: the BFF reaches Cognito and Secrets Manager over their public endpoints with TLS.<br>"
     "The refresh token lives only in an HttpOnly cookie; ID and access tokens only in page memory.<br>"
+    "Refresh tokens are bound to their client: a public-client refresh token sent to the BFF is refused by Cognito.<br>"
     "The components view (architect_components.drawio) shows the same system as AWS resources per Region and stack.",
     fs=13,
 )

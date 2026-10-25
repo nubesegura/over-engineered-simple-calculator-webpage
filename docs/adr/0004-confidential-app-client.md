@@ -1,6 +1,6 @@
 # ADR 0004: Confidential app client
 
-- Status: Accepted (2026-10-04, amendment 1 of spec 001). Amended 2026-10-25 by spec 006 and [ADR 0008](0008-dual-iac-terraform-and-cloudformation.md): the secret store moved from SSM Parameter Store to Secrets Manager. The decision itself (a confidential client whose secret only the BFF knows) is unchanged.
+- Status: Accepted (2026-10-04, amendment 1 of spec 001). Amended 2026-10-25 by spec 006 and [ADR 0008](0008-dual-iac-terraform-and-cloudformation.md): the secret store moved from SSM Parameter Store to Secrets Manager. The decision itself (a confidential client whose secret only the BFF knows) is unchanged. Extended 2026-10-25 by spec 007 and [ADR 0009](0009-one-app-client-per-client-type.md): the pool also has a separate public client for command-line tools; this ADR covers the BFF's client only.
 
 ## Context
 
@@ -15,7 +15,7 @@ The app client is **confidential**: Cognito generates a client secret and only t
 - Login sends `SECRET_HASH` (Base64 of HMAC-SHA256 over the typed username followed by the client ID, keyed with the secret). Renewal uses `GetTokensFromRefreshToken` with the client secret. Revocation passes the client secret to `RevokeToken`. The Cognito client stays unsigned; the secret, not AWS credentials, authenticates the BFF. The cookie format does not change.
 - The secret and any hash derived from it are never logged, never put in an error and never returned.
 
-Result: Cognito should refuse `InitiateAuth` for this client without the secret hash, so passwords can only be tried through the BFF. This is checked in dev after the first deployment (task 6.6 of spec 001) and is **not yet verified**.
+Result: Cognito should refuse `InitiateAuth` for this client without the secret hash, so passwords can only be tried through the BFF with this client (the public client of ADR 0009 does not have this property). This is checked in dev after the first deployment (task 6.6 of spec 001) and is **not yet verified**.
 
 ### History of the secret store
 

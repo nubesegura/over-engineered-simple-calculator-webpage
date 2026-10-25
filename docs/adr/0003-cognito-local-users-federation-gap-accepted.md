@@ -19,7 +19,7 @@ The user pool has **local users only**: the owner creates them as administrator 
 ## Consequences
 
 - Passwords are stored by Cognito; the BFF only passes them through memory during login.
-- The app client is **confidential** (it has a client secret, see [ADR 0004](0004-confidential-app-client.md)), so the public client ID alone cannot be used to try passwords directly against Cognito; they can only be tried through the BFF. This does not change the federation gap: users are still local.
+- The BFF's app client is **confidential** (it has a client secret, see [ADR 0004](0004-confidential-app-client.md)), so the ID of that client alone cannot be used to try passwords directly against Cognito; with it they can only be tried through the BFF. Since spec 007 the pool also has a public app client for command-line tools ([ADR 0009](0009-one-app-client-per-client-type.md)), through which direct attempts are possible (accepted for dev, gap G11 in the README). This does not change the federation gap: users are still local.
 - The owner must create each user by hand in the console of each environment and set a permanent password (see the README).
 - Related accepted gaps: no MFA (G5); SRP, passkeys and MFA stay as future options (ADR 0004). Federation can be added later without changing the BFF contract, since backends validate only the ID token of the pool.
 - `prod` has deletion protection on the pool; users are recreated by hand if the pool is lost.

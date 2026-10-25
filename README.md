@@ -51,7 +51,7 @@ Everything related to API routes lives in [`src/calculator_app/lib/constants.dar
 src/calculator_app/        Flutter app (lib/constants.dart, lib/api_address.dart, lib/main.dart, lib/auth/, tests)
 src/auth_bff/              BFF Lambda (Python): handler.py, src/auth_bff/, tests
 modules/frontend/          Terraform module: S3, CloudFront (OAC, /auth/* behavior), ACM, Route 53
-modules/auth/              Terraform module: Cognito user pool and app client
+modules/auth/              Terraform module: Cognito user pool, confidential and public app clients, client secret
 modules/auth-bff/          Terraform module: BFF Lambda, function URL, role, logs, SNS topic, alarms
 environments/
   root.hcl                 Provider, S3 remote state, naming and mandatory tags
@@ -75,7 +75,7 @@ Per environment (each one deployed to its own AWS account, region `us-east-2`):
 
 - **S3 bucket** `bckt-useast2-oecalc-web-<env>-<account>`: private, block public access, versioning with lifecycle for old versions, SSE-S3 encryption, TLS-only policy, readable only by the distribution (OAC).
 - **CloudFront** with OAC, TLS 1.2, HTTP/2 and HTTP/3, compression, HSTS, a Content Security Policy and other security headers, and the app shell served for unknown paths. The ordered behavior `/auth/*` goes to the BFF; everything else goes to S3.
-- **Cognito user pool and confidential app client** (`modules/auth`), see [Users and the user pool](#users-and-the-user-pool).
+- **Cognito user pool, confidential app client (BFF) and public app client (command-line tools)** (`modules/auth`), see [Users and the user pool](#users-and-the-user-pool).
 - **Secrets Manager secret** `sm-useast2-oecalc-auth-app-client-<env>` (AWS managed key, no rotation, TLS-only resource policy) with the app client secret; only the BFF role can read it.
 - **BFF Lambda** (`modules/auth-bff`): Python 3.14 on arm64, reachable only through CloudFront (function URL with IAM authorization and origin access control). Its role writes its own logs and reads one secret (`secretsmanager:GetSecretValue` on the app client secret); X-Ray is added in prod. See [Security notes](#security-notes) and `docs/architecture.md`.
 - **ACM certificate** (us-east-1, DNS validated in Route 53) and `A`/`AAAA` alias records.
@@ -97,14 +97,20 @@ The naming convention (`<acronym>-<region>-<context>[-<descriptor>]-<env-type>`)
 
 ### Users and the user pool
 
-Each environment has its own Cognito user pool and one **confidential** app client (it has a client secret; only the `USER_PASSWORD_AUTH` and `REFRESH_TOKEN_AUTH` flows; token revocation on). The client ID is public (it is the audience of the tokens), so without a secret anyone could try passwords directly against Cognito; with the secret, only the BFF can sign in, refresh or revoke (see [ADR 0004](docs/adr/0004-confidential-app-client.md)). The email address is the username. Only administrators create users: there is no sign-up, no password reset by the user and no MFA. Passwords need at least 12 characters with lowercase, uppercase, a number and a symbol. In `prod` the pool has deletion protection; in `dev` it does not.
+Each environment has its own Cognito user pool and **two app clients**, one per client type (see [ADR 0009](docs/adr/0009-one-app-client-per-client-type.md)). Both allow only the `USER_PASSWORD_AUTH` and `REFRESH_TOKEN_AUTH` flows, with token revocation on and no OAuth flows:
 
-The pool exposes two identifiers, printed in the job summary of each deployment (see [Hand-off to the backends](#hand-off-to-the-backends)):
+- **Confidential client** `cgnc-useast2-oecalc-<env>`: it has a client secret and is the one the BFF uses. Cognito should refuse a sign-in with this client that lacks the secret hash, so passwords can only be tried through the BFF with this client (see [ADR 0004](docs/adr/0004-confidential-app-client.md); that refusal is **not yet verified**). Its ID is the audience of the tokens the backends validate.
+- **Public client** `cgnc-useast2-oecalc-wscli-<env>` (spec 007, deployed in dev on 2026-10-25): no secret, for command-line tools and end-to-end tests of the `websocket` repository. The BFF never uses it: a refresh token issued to this client is refused by the BFF (401 `session_expired`), because Cognito binds a refresh token to the client that issued it. Refresh tokens last 24 hours, without rotation. Because it has no secret, **anyone who knows its client ID can try passwords directly against Cognito**, bypassing the BFF and the WAF (gap G11).
+
+The email address is the username. Only administrators create users: there is no sign-up, no password reset by the user and no MFA. Passwords need at least 12 characters with lowercase, uppercase, a number and a symbol. In `prod` the pool has deletion protection; in `dev` it does not.
+
+The pool exposes three identifiers, printed in the job summary of each deployment (see [Hand-off to the backends](#hand-off-to-the-backends)):
 
 - `user_pool_id` (hand-off name `COGNITO_USER_POOL_ID`)
-- `app_client_id` (hand-off name `COGNITO_APP_CLIENT_ID`)
+- `app_client_id` (hand-off name `COGNITO_APP_CLIENT_ID`, the confidential client)
+- `public_app_client_id` (hand-off name `COGNITO_PUBLIC_APP_CLIENT_ID`, the public client, only for command-line tools and end-to-end tests; the CloudFormation output is `PublicAppClientId`)
 
-(The Terraform module also outputs the pool ARN, the issuer URL and the name and ARN of the secret. The secret value itself is never an output, an environment variable or a log line.)
+(The Terraform module also outputs the pool ARN, the issuer URL and the name and ARN of the secret. The secret value itself is never an output, an environment variable or a log line. The public client has no secret and no secret resource.)
 
 #### The client secret
 
@@ -139,14 +145,20 @@ Users are not exported or backed up. If the pool is lost, recreate the users by 
 
 ### Hand-off to the backends
 
-The backends (sls, ecs) validate the ID token with the pool of their environment (issuer, audience = app client ID, `token_use=id`, expiry). After each deployment of this repository the workflow summary prints two lines for the environment:
+The backends (sls, ecs) validate the ID token with the pool of their environment (issuer, audience = app client ID, `token_use=id`, expiry). After each deployment of this repository the workflow summary prints three values for the environment, in two blocks. The first block is for the backends:
 
 ```
 COGNITO_USER_POOL_ID=<value>
 COGNITO_APP_CLIENT_ID=<value>
 ```
 
-Create both as **GitHub environment variables** with the same names, in the environment of the same name (`dev` or `prod`) of each backend repository. They are identifiers, not secrets. There is no region variable: the backends use the same region. If the user pool or the app client is recreated, **both values change and the variables in every backend repository must be updated before their next deployment.** This includes the first deployment with the confidential client: the app client is replaced, so `COGNITO_APP_CLIENT_ID` changes.
+The second block, labeled "Public app client (no secret)", is only for command-line tools and end-to-end tests, never for the BFF or the backends:
+
+```
+COGNITO_PUBLIC_APP_CLIENT_ID=<value>
+```
+
+Create the first two as **GitHub environment variables** with the same names, in the environment of the same name (`dev` or `prod`) of each backend repository. The third one is for the `websocket` repository (its command-line tool and e2e tests): create it there with the same name, in the matching environment. As of 2026-10-25 that repository has no `dev` GitHub environment, so the dev value has not been copied yet. All three are identifiers, not secrets. There is no region variable: the backends use the same region. If the user pool or the app client is recreated, **both values change and the variables in every backend repository must be updated before their next deployment.** This includes the first deployment with the confidential client: the app client is replaced, so `COGNITO_APP_CLIENT_ID` changes.
 
 ### WAF in prod
 
@@ -225,9 +237,9 @@ aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths 
 
 ## Deployment order
 
-1. **This repository first**: deploy `dev` (push to `develop`) or `prod` (push to `main`; see the `IAC_TOOL` note above, prod is Terraform-owned until B003). The workflow creates the pool, the BFF and the distribution, publishes the page and prints the two Cognito values.
+1. **This repository first**: deploy `dev` (push to `develop`) or `prod` (push to `main`; see the `IAC_TOOL` note above, prod is Terraform-owned until B003). The workflow creates the pool, the BFF and the distribution, publishes the page and prints the three Cognito values (two for the backends, one public client ID for the `websocket` repository).
 2. Confirm the SNS email subscriptions, and create the user(s) with a permanent password.
-3. **Then the variables**: create `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID` in the matching GitHub environment of each backend repository.
+3. **Then the variables**: create `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID` in the matching GitHub environment of each backend repository, and `COGNITO_PUBLIC_APP_CLIENT_ID` in the `websocket` repository.
 4. **Then the backend** repositories, which validate tokens with that pool. Their record under `api.<web domain>` is created from the shared-resources repository (see [Shared API hostname](#shared-api-hostname)); this repository is not deployed again for it.
 
 ## CI/CD (gitflow)
@@ -272,7 +284,7 @@ The OIDC deployment role needs permissions for the services below (a checklist; 
 - [ ] ACM (the certificate in us-east-1)
 - [ ] Route 53 (records in the environment's zone)
 
-After the first deployment of an environment follow [Deployment order](#deployment-order): confirm the SNS subscriptions, create the users and hand the two Cognito values to the backends.
+After the first deployment of an environment follow [Deployment order](#deployment-order): confirm the SNS subscriptions, create the users and hand the Cognito values over (two to the backends, the public client ID to the `websocket` repository).
 
 ## Run the app locally
 
@@ -305,8 +317,9 @@ The design and its known gaps were reviewed before implementation. Summary of th
 | G8 | The SNS topic of the BFF alarms is not encrypted with a customer managed key. Decision: no KMS for SNS unless the owner asks for it (about USD 1 per month per environment). |
 | G9 | The BFF execution role has no permissions boundary. No boundary policy exists in the accounts today; consider one in the future if it is created. |
 | G10 | The app client secret is in the Terraform state (encrypted S3 bucket; only for Terraform-owned environments, prod today) and in Secrets Manager; CloudFormation-owned environments (dev) have no state file. A lost or leaked secret needs a new app client, whose ID the backends must receive again. No further fix needed at this scale. |
+| G11 | The public app client (spec 007, dev only for now) has no secret, so direct password guessing against Cognito with its client ID bypasses the BFF and the prod WAF (P1), and a flood or lockout through it also blocks BFF logins because the user lockout and the account sign-in quota are shared (P2). ID tokens issued to developer machines are accepted by backends that check only the issuer (P3), and its refresh tokens (24 hours) live on developer machines or CI runners (P4). Compensating: administrator-created users only, 12-character passwords, generic errors, Cognito lockout, no sign-in alarm. Revisit before prod (B003). P1 to P4 are proposed for the owner's acceptance; they are listed in the design review. |
 
-Closed by the confidential client: the Cognito client ID is public, so before the secret anyone could try passwords directly against Cognito. Now Cognito should refuse `InitiateAuth` for the client without the secret hash, so passwords can only be tried through the BFF (checked in dev after the first deployment, task 6.6; **not yet verified**).
+Per client: the confidential client closes direct password guessing only if Cognito refuses `InitiateAuth` without the secret hash, so that passwords can only be tried through the BFF with it (checked in dev after the first deployment, task 6.6; **not yet verified**). The public client does not have that protection, see G11.
 
 Other facts: the cookie is `HttpOnly`, `Secure`, `SameSite=Strict`, path `/auth`, and its value is validated when it is set and when it is read; the BFF accepts only its own origin (`ALLOWED_ORIGIN` must be `https://<host>` with no path); an unexpected error answers a generic 500 with the request ID and no detail; passwords, tokens, the cookie, the client secret and any hash of it are never logged; the function URL is meant to be callable only through CloudFront (**not yet verified:** the real behavior of the function URL with OAC in a deployed environment). Also **not yet verified**: the Content Security Policy in a browser, and the user pool tier `LITE` against a deployed pool.
 
@@ -317,7 +330,8 @@ Other facts: the cookie is `HttpOnly`, `Secure`, `SameSite=Strict`, path `/auth`
 ## Known limits (dated 2026-10-25)
 
 - The email subscription of the dev BFF alerts topic is `PendingConfirmation`: alarm notifications of the BFF are not verified in dev until the address confirms it (the certificate topic is confirmed).
-- The `ec2` repository still holds the Cognito identifiers of the dev environment that existed before spec 006; the other backend repositories got the new dev values. The `websocket` repository has no `dev` GitHub environment, so it cannot receive them.
+- The `ec2` repository still holds the Cognito identifiers of the dev environment that existed before spec 006; the other backend repositories got the new dev values. The `websocket` repository has no `dev` GitHub environment, so it cannot receive them, nor `COGNITO_PUBLIC_APP_CLIENT_ID` of dev.
+- The public app client exists in dev only (deployed 2026-10-25). Prod gets it with its next Terraform deploy or with B003; the Terraform side was validated offline only (`terraform validate`), no plan was run against a real environment.
 - Dev has no backend behind `api.<dev host>` (that hostname belongs to shared-resources and has no service behind it yet), so the calculation step of the e2e test is informational.
 - A dev e2e test user (`test-user-1@example.com`) is kept in the dev pool by owner decision. Delete it with `python scripts/e2e/create_test_user.py --delete`.
 - Prod has no CloudFormation stack and the prod rehearsal (`--parameters-env prod --review-only`) was not run: both wait for B003.
