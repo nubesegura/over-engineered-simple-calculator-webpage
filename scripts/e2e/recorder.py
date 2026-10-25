@@ -92,7 +92,7 @@ def pid_alive(pid: int) -> bool:
     """True when a process with this PID exists (Windows and POSIX)."""
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if sys.platform == "win32":
         import ctypes  # Windows only
 
         synchronize = 0x00100000
@@ -118,13 +118,16 @@ def supervise(output: Path, area: str | None, max_seconds: int) -> int:
     paths = helper_paths(output)
     ffmpeg = find_ffmpeg()
     with paths["log"].open("ab") as log:
+        # No console window: it would appear on the recorded monitor on top of the browser.
+        no_window = 0
+        if sys.platform == "win32":
+            no_window = subprocess.CREATE_NO_WINDOW
         process = subprocess.Popen(  # fixed argument list, no shell
             ffmpeg_command(ffmpeg, output, area, max_seconds),
             stdin=subprocess.PIPE,
             stdout=log,
             stderr=log,
-            # No console window: it would appear on the recorded monitor on top of the browser.
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=no_window,
         )
         paths["pid"].write_text(json.dumps({"supervisor": os.getpid(), "ffmpeg": process.pid}), encoding="utf-8")
         while process.poll() is None:
@@ -154,7 +157,7 @@ def start(output: Path, area: str | None, max_seconds: int) -> int:
     if area:
         args += ["--area", area]
     flags = 0
-    if os.name == "nt":
+    if sys.platform == "win32":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     subprocess.Popen(  # fixed argument list, no shell
         args,
@@ -163,7 +166,7 @@ def start(output: Path, area: str | None, max_seconds: int) -> int:
         stderr=subprocess.DEVNULL,
         creationflags=flags,
         close_fds=True,
-        start_new_session=os.name != "nt",
+        start_new_session=sys.platform != "win32",
     )
     deadline = time.monotonic() + START_CHECK_SECONDS + 5
     while time.monotonic() < deadline and not paths["pid"].exists():
@@ -244,7 +247,7 @@ def stop(output: Path) -> int:
 
 def primary_monitor_area() -> str:
     """Rectangle of the primary monitor in physical pixels (gdigrab offsets start at its top-left corner)."""
-    if os.name != "nt":
+    if sys.platform != "win32":
         sys.exit("--area primary needs Windows; pass an explicit WxH+X+Y")
     import ctypes  # Windows only
 
