@@ -140,10 +140,10 @@ CloudFront signs requests to the function URL (origin access control of type `la
 Response headers policy `rhp-useast2-oecalc-web-<env>`, applied to both behaviors: HSTS (2 years, include subdomains, preload), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin` and:
 
 ```
-Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
 ```
 
-`connect-src` allows any `https:` URL (kept broad since the Service URL can be overridden at build time). The Flutter build uses `--no-web-resources-cdn` so CanvasKit, fonts and scripts come from the page's own origin. **Status: built, not yet verified in a browser** against a deployed environment (it is a known open item); if the policy blocks the app, loosen only the directive that is blocked and update this section.
+`connect-src` allows any `https:` URL (kept broad since the Service URL can be overridden at build time) and any `wss:` URL (added for the dev-only real-time WebSocket mode; a browser test showed `https:` alone blocks `wss://`). The policy is shared by all environments, so `wss:` is also in the prod policy even though the prod build never defines `WS_BASE_URL`. The Flutter build uses `--no-web-resources-cdn` so CanvasKit, fonts and scripts come from the page's own origin. **Status: built, not yet verified in a browser** against a deployed environment (it is a known open item); if the policy blocks the app, loosen only the directive that is blocked and update this section.
 
 ## Cognito settings (`modules/auth`)
 

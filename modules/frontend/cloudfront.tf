@@ -57,8 +57,10 @@ resource "aws_cloudfront_response_headers_policy" "security" {
     # it can be narrowed to that host once confirmed in a browser. The build serves CanvasKit and
     # fonts from this origin (--no-web-resources-cdn), so no third-party host is needed.
     # Validate in a browser in dev before prod and loosen only what is blocked.
+    # wss: was added for the dev real-time (WebSocket) mode: the browser test of 2026-10-26 showed the
+    # previous policy blocked it. Only the scheme is added; the host stays open like https:.
     content_security_policy {
-      content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
       override                = true
     }
 

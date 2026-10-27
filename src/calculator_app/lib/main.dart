@@ -10,6 +10,14 @@ import 'auth/auth_api.dart';
 import 'auth/login_page.dart';
 import 'auth/session_controller.dart';
 import 'constants.dart';
+import 'realtime/realtime_address.dart';
+import 'realtime/realtime_calculator_client.dart';
+import 'realtime/realtime_channel.dart';
+import 'realtime/realtime_constants.dart';
+import 'realtime/realtime_controller.dart';
+import 'realtime/realtime_mode_selector.dart';
+import 'realtime/realtime_status.dart';
+import 'realtime/realtime_status_chip.dart';
 
 void main() {
   runApp(const CalculatorApp());
@@ -24,10 +32,18 @@ class CalculatorApp extends StatefulWidget {
     this.loginSupported = kIsWeb,
     this.apiBaseUrl,
     this.stopwatchFactory,
+    this.realtimeAddress,
+    this.realtimeChannels,
   });
 
   /// Stopwatch factory for the response time; only injected by tests.
   final Stopwatch Function()? stopwatchFactory;
+
+  /// Real-time address; read from the `WS_BASE_URL` build setting when null.
+  final RealtimeAddress? realtimeAddress;
+
+  /// Opens the real-time connections; only injected by tests.
+  final RealtimeChannelFactory? realtimeChannels;
 
   /// Client for the calculator backends.
   final http.Client? httpClient;
@@ -93,6 +109,8 @@ class _CalculatorAppState extends State<CalculatorApp> {
           httpClient: widget.httpClient,
           stopwatchFactory: widget.stopwatchFactory ?? Stopwatch.new,
           apiBaseUrl: widget.apiBaseUrl ?? deriveApiBaseUrl(),
+          realtimeAddress: widget.realtimeAddress,
+          realtimeChannels: widget.realtimeChannels,
         );
     }
   }
@@ -105,7 +123,13 @@ class CalculatorHomePage extends StatefulWidget {
     required this.apiBaseUrl,
     this.httpClient,
     this.stopwatchFactory = Stopwatch.new,
+    this.realtimeAddress,
+    this.realtimeChannels,
   });
+
+  /// Real-time address; read from the build setting when null.
+  final RealtimeAddress? realtimeAddress;
+  final RealtimeChannelFactory? realtimeChannels;
 
   /// Creates the monotonic stopwatch of one calculation; tests inject a fake.
   final Stopwatch Function() stopwatchFactory;
@@ -119,12 +143,22 @@ class CalculatorHomePage extends StatefulWidget {
   State<CalculatorHomePage> createState() => _CalculatorHomePageState();
 }
 
-class _CalculatorHomePageState extends State<CalculatorHomePage> {
+class _CalculatorHomePageState extends State<CalculatorHomePage>
+    with WidgetsBindingObserver {
   final TextEditingController _controllerA = TextEditingController();
   final TextEditingController _controllerB = TextEditingController();
   String _result = '0';
   String? _backend;
+  bool _showTransport = false;
   int? _responseMs;
+
+  /// The real-time connection; lives as long as the signed-in page, so logout
+  /// and session expiry (which replace the page) close it.
+  late final RealtimeController _realtime;
+  bool _realtimeMode = false;
+
+  /// True while the shown outcome is "not connected": offers the REST action.
+  bool _offerRestFallback = false;
 
   /// Bumped whenever the shown outcome is reset, to drop late time updates.
   int _generation = 0;
@@ -139,7 +173,31 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
   Timer? _historyRefreshTimer;
 
   @override
+  void initState() {
+    super.initState();
+    _realtime = RealtimeController(
+      tokens: widget.session,
+      address: widget.realtimeAddress ?? RealtimeAddress.fromEnvironment(),
+      channels: widget.realtimeChannels,
+    )..addListener(_onRealtimeChanged);
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _onRealtimeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _realtime.setTabVisible(state == AppLifecycleState.resumed);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _realtime
+      ..removeListener(_onRealtimeChanged)
+      ..dispose();
     _historyRefreshTimer?.cancel();
     _controllerA.dispose();
     _controllerB.dispose();
@@ -162,7 +220,46 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
 
   Future<void> _calculate() async {
     if (_controllerA.text.isEmpty || _controllerB.text.isEmpty) return;
+    if (_realtimeMode) return _calculateRealtime();
+    return _calculateRest();
+  }
 
+  Future<void> _calculateRealtime() async {
+    setState(() {
+      _resetOutcome();
+      _isLoading = true;
+      _result = 'Calculating...';
+    });
+    final generation = _generation;
+    final stopwatch = widget.stopwatchFactory()..start();
+    final outcome = await _realtime.calculate(
+      operation: _selectedOperation,
+      a: _controllerA.text,
+      b: _controllerB.text,
+    );
+    if (!mounted) return;
+    if (outcome is CalculationCancelled || generation != _generation) {
+      setState(() => _isLoading = false);
+      return;
+    }
+    setState(() {
+      _isLoading = false;
+      switch (outcome) {
+        case CalculationSuccess(:final result):
+          _result = result;
+          _showTransport = true;
+        case CalculationFailure(:final message, :final kind):
+          _result = message;
+          _offerRestFallback = kind == FailureKind.notConnected;
+        case CalculationCancelled():
+          break;
+      }
+    });
+    if (outcome is CalculationSuccess) _stopAfterFrame(stopwatch);
+  }
+
+  /// One calculation through REST, whatever the selected mode is.
+  Future<void> _calculateRest() async {
     final client = _client();
     final problem = _addressProblem(client);
     if (problem != null) {
@@ -216,7 +313,53 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
     _generation++;
     _result = '0';
     _backend = null;
+    _showTransport = false;
+    _offerRestFallback = false;
     _responseMs = null;
+  }
+
+  /// The inputs changed: forget the outcome and any real-time request.
+  void _onInputChanged() {
+    if (_realtimeMode) _realtime.discardPending();
+    setState(_resetOutcome);
+  }
+
+  void _selectMode(bool realtime) {
+    if (realtime == _realtimeMode) return;
+    setState(() {
+      _realtimeMode = realtime;
+      _resetOutcome();
+    });
+    if (realtime) {
+      unawaited(_realtime.activate());
+    } else {
+      _realtime.deactivate();
+    }
+  }
+
+  Widget _buildRealtimeStatus() {
+    final status = _realtime.status;
+    final canReconnect = status.kind == RealtimeStatusKind.disconnected ||
+        status.kind == RealtimeStatusKind.notAuthorized;
+    return Column(
+      children: [
+        const SizedBox(height: 12),
+        RealtimeStatusChip(status: status),
+        if (status.detail != null) ...[
+          const SizedBox(height: 8),
+          Text(status.detail!, key: const Key('realtime-status-detail')),
+        ],
+        if (canReconnect)
+          TextButton(
+            key: const Key('realtime-reconnect'),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, kRealtimeTouchTarget),
+            ),
+            onPressed: () => unawaited(_realtime.reconnect()),
+            child: const Text(RealtimeConstants.reconnectLabel),
+          ),
+      ],
+    );
   }
 
   /// The history is eventually consistent: wait a moment before reloading it. Only
@@ -385,6 +528,12 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                     key: const Key('service-url-label'),
                   ),
                 ),
+                const SizedBox(height: 16),
+                RealtimeModeSelector(
+                  realtime: _realtimeMode,
+                  onChanged: _selectMode,
+                ),
+                if (_realtimeMode) _buildRealtimeStatus(),
                 const SizedBox(height: 32),
                 TextField(
                   key: const Key('first-number-field'),
@@ -395,7 +544,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                     labelText: 'First Number',
                     labelStyle: TextStyle(fontSize: 22),
                   ),
-                  onChanged: (_) => setState(_resetOutcome),
+                  onChanged: (_) => _onInputChanged(),
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -407,7 +556,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                     labelText: 'Second Number',
                     labelStyle: TextStyle(fontSize: 22),
                   ),
-                  onChanged: (_) => setState(_resetOutcome),
+                  onChanged: (_) => _onInputChanged(),
                 ),
                 const SizedBox(height: 32),
                 Row(
@@ -426,13 +575,30 @@ class _CalculatorHomePageState extends State<CalculatorHomePage> {
                   child:
                       const Text('Calculate', style: TextStyle(fontSize: 22)),
                 ),
+                if (_isLoading && _realtimeMode) ...[
+                  const SizedBox(height: 16),
+                  const LinearProgressIndicator(
+                    key: Key('realtime-progress'),
+                    semanticsLabel: RealtimeConstants.progressLabel,
+                  ),
+                ],
                 const SizedBox(height: 32),
                 Text(
                   'Result: $_result',
                   style: const TextStyle(
                       fontSize: 22, fontWeight: FontWeight.bold),
                 ),
+                if (_offerRestFallback)
+                  TextButton(
+                    key: const Key('use-rest-fallback'),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, kRealtimeTouchTarget),
+                    ),
+                    onPressed: _isLoading ? null : _calculateRest,
+                    child: const Text(RealtimeConstants.useRestLabel),
+                  ),
                 if (_backend != null) Text('Backend: $_backend'),
+                if (_showTransport) const Text(RealtimeConstants.transportLine),
                 if (_responseMs != null) Text('Response time: $_responseMs ms'),
                 const SizedBox(height: 24),
                 const Divider(),

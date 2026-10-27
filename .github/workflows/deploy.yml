@@ -81,8 +81,14 @@ jobs:
           AWS_ACCOUNT_ID_SET: ${{ secrets.AWS_ACCOUNT_ID != '' }}
           SUPPORT_EMAIL_SET: ${{ secrets.SUPPORT_EMAIL != '' }}
           WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+          WS_BASE_URL: ${{ vars.WS_BASE_URL }}
         run: |
           missing=0
+          # Real-time mode is dev only: fail before any infrastructure step (the build step checks again).
+          if [ "$TARGET" = "prod" ] && [ -n "$WS_BASE_URL" ]; then
+            echo "::error::WS_BASE_URL must not be defined for prod (real-time mode is dev only). Remove the variable from the prod environment and from the repository scope."
+            missing=1
+          fi
           for name in AWS_REGION ROUTE53_ZONE_ID; do
             if [ -z "${!name}" ]; then
               echo "::error::Variable '$name' is not set in the '$TARGET' GitHub environment"
@@ -247,9 +253,10 @@ jobs:
             echo '```'
           }>> "$GITHUB_STEP_SUMMARY"
 
-      # The app is identical in every environment: the API address is derived from the
-      # host of the page (optional override: variable API_BASE_URL) and the user logs in
-      # through the BFF, so nothing environment-specific is built in.
+      # The API address is derived from the host of the page (optional override: variable
+      # API_BASE_URL) and the user logs in through the BFF. The only environment-specific build
+      # input is the optional real-time address WS_BASE_URL, which exists in dev only: it is passed
+      # to the build for dev and the build fails if it is set for prod (the token travels in the URL).
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -262,11 +269,21 @@ jobs:
         env:
           # Optional override of the API address; empty keeps the address derived from the host.
           API_BASE_URL: ${{ vars.API_BASE_URL }}
+          # Dev only (real-time mode). Never defined for prod; the value is never printed.
+          WS_BASE_URL: ${{ vars.WS_BASE_URL }}
+          TARGET: ${{ inputs.environment }}
         run: |
+          if [ "$TARGET" = "prod" ] && [ -n "$WS_BASE_URL" ]; then
+            echo "::error::WS_BASE_URL must not be defined for prod (real-time mode is dev only). Remove the variable from the prod environment and from the repository scope."
+            exit 1
+          fi
           flutter pub get
           DEFINES=()
           if [ -n "$API_BASE_URL" ]; then
             DEFINES+=("--dart-define=API_BASE_URL=$API_BASE_URL")
+          fi
+          if [ "$TARGET" = "dev" ] && [ -n "$WS_BASE_URL" ]; then
+            DEFINES+=("--dart-define=WS_BASE_URL=$WS_BASE_URL")
           fi
           flutter build web --release --no-web-resources-cdn "${DEFINES[@]}"
 
