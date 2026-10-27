@@ -206,6 +206,86 @@ def test_refusal_ok(status: int, ctype: str, ok: bool) -> None:
     assert web_driver.refusal_ok(status, ctype) is ok
 
 
+def test_status_semantics_label() -> None:
+    assert web_driver.status_semantics_label("Connected") == "Connection status: Connected"
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("Result: Cannot divide by zero.", True),
+        ("Result: 0", False),
+        ("Cannot divide by zero.", False),
+    ],
+)
+def test_message_shown(text: str, ok: bool) -> None:
+    assert web_driver.message_shown(text, "Cannot divide by zero.") is ok
+
+
+def test_result_text_ok_accepts_other_expected_value() -> None:
+    assert web_driver.result_text_ok("Result: 42.0", "42") is True
+    assert web_driver.result_text_ok("Result: 13", "42") is False
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.on_close: Any = None
+
+    def on(self, event: str, handler: Any) -> None:
+        assert event == "close"
+        self.on_close = handler
+
+
+def test_socket_tracker_counts_open_and_closed() -> None:
+    tracker = web_driver.SocketTracker()
+    first, second = FakeSocket(), FakeSocket()
+    tracker.track(first)
+    tracker.track(second)
+    assert not tracker.all_closed()
+    first.on_close(first)
+    second.on_close(second)
+    assert tracker.all_closed() and tracker.summary() == "opened 2, closed 2"
+
+
+def test_token_search_detects_planted_fake_token() -> None:
+    """Self-test: the leak search must flag a planted token in the console lines and in a run folder."""
+    planted_url = f"wss://ws.example.invalid/dev?token={JWT}"
+    assert set(web_driver.console_leaks(["connected", planted_url], [PASSWORD])) == {"jwt", "token-query"}
+    assert set(web_driver.console_leaks(["opening wss://ws.example.invalid/dev?token=abc"], [])) == {"token-query"}
+    assert web_driver.console_leaks(["Connected", "Result: 42"], [PASSWORD]) == []
+
+
+def test_token_search_in_run_folder_and_redacted_value(tmp_path: Path) -> None:
+    (tmp_path / "console.log").write_text("GET wss://ws.example.invalid/dev?token=fake-value", encoding="utf-8")
+    assert e2e_redact.scan_folder(tmp_path, []) == {"console.log": ["token-query"]}
+    (tmp_path / "console.log").write_text("Set-Cookie: idtoken=<redacted>", encoding="utf-8")
+    assert e2e_redact.scan_folder(tmp_path, []) == {}
+
+
+def test_redact_masks_query_token_and_scan_passes() -> None:
+    raw = f'{{"url":"wss://ws.example.invalid/dev?a=1&token={JWT}&b=2"}} x?token%3Dabc \u0026token=def'.encode()
+    masked = e2e_redact.redact_bytes(raw, [])
+    assert JWT.encode() not in masked and b"abc" not in masked and b"def" not in masked
+    assert b"token=<redacted>&b=2" in masked
+    assert e2e_redact.secret_kinds(masked, []) == []
+    assert "token-query" in e2e_redact.secret_kinds(raw, [])
+
+
+@pytest.mark.parametrize(
+    "text", ["csrf_token=abc", "next_page_token=xyz", "access_token=q", "a.token=1;", "id_token=z"]
+)
+def test_other_token_names_do_not_fire(text: str) -> None:
+    assert "token-query" not in e2e_redact.secret_kinds(text.encode(), [])
+    assert "token-query" not in web_driver.console_leaks([text], [])
+
+
+def test_scan_skips_trace_resources_but_scans_events(tmp_path: Path) -> None:
+    with zipfile.ZipFile(tmp_path / "trace.zip", "w") as archive:
+        archive.writestr("resources/abc123", "var u = '?token=' + value; fetch('/x?token=a')")
+        archive.writestr("0-trace.network", "GET wss://ws.example.invalid/dev?token=fake")
+    assert e2e_redact.scan_folder(tmp_path, []) == {"trace.zip!0-trace.network": ["token-query"]}
+
+
 def test_run_dir_name_is_utc() -> None:
     assert web_driver.run_dir_name(datetime(2026, 10, 25, 3, 4, 5, tzinfo=UTC)) == "2026-10-25-030405"
 

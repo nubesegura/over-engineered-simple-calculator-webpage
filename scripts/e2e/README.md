@@ -41,6 +41,20 @@ ffmpeg must be on the PATH for `--record` (Windows screen capture, `recorder.py`
 The driver rescans the whole run folder for secrets at the end (check "no secrets in the run folder"); the collector
 fails its check "no secrets in logs" if a password or JWT is found in the raw logs. Treat either failure as a finding.
 
+## Real-time (WebSocket) steps
+
+After the REST calculation the driver chooses `Real-time (WebSocket)`, waits for the chip `Connection status: Connected`,
+calculates 6 x 7 (expects 42) and 1 / 0 (expects `Result: Cannot divide by zero.`), logs out and checks that every
+WebSocket the page opened is closed (the socket URL carries the token, so only counts are logged). The REST calculation
+stays informational unless `--require-backend` is given (7.5); the real-time checks always decide the run.
+Selectors use the app labels: `Real-time (WebSocket)`, `Connection status: <status>`, `×`, `÷`, `Result:`.
+
+Token checks (fail the run if found): the browser console lines are searched for a password, a JWT or a `token=` query
+parameter (check "no token or token= in the browser console"). The trace is redacted first (a `?token=<value>` value
+becomes `<redacted>`), then the run folder scan fails on any `token=` query value that is still unmasked (check "no secrets
+in the run folder"); the compiled app files stored under `resources/` in the trace are not scanned. Only a parameter named
+exactly `token` counts (`csrf_token=` and similar do not). CloudWatch logs are checked by `collect_logs.py` (JWT and password).
+
 ## Notes
 
 - Flutter web draws on a canvas: the driver clicks the accessibility placeholder first so Playwright can see the

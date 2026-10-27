@@ -22,7 +22,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import e2e_env
 import e2e_log
@@ -34,6 +37,9 @@ SECOND_NUMBER = "7"
 EXPECTED_SUM = "13"
 STEP_TIMEOUT_MS = 20_000
 CALCULATE_TIMEOUT_MS = 20_000
+REALTIME_MODE_LABEL = "Real-time (WebSocket)"
+CONNECTED = "Connected"
+DIVIDE_BY_ZERO = "Cannot divide by zero."
 
 
 def run_dir_name(now: datetime | None = None) -> str:
@@ -59,6 +65,42 @@ def result_text_ok(text: str, expected: str = EXPECTED_SUM) -> bool:
         return float(value) == float(expected)
     except ValueError:
         return False
+
+
+def status_semantics_label(status: str) -> str:
+    """Accessible name of the real-time status chip (RealtimeConstants.statusSemanticsLabel in the app)."""
+    return f"Connection status: {status}"
+
+
+def message_shown(text: str, message: str) -> bool:
+    """True when the result line is `Result: <message>` (the app shows real-time errors in the result line)."""
+    return text.strip().startswith("Result:") and message in text
+
+
+def console_leaks(lines: list[str], passwords: list[str]) -> list[str]:
+    """Kinds of secret (never values) found in the browser console lines: password, JWT or `token=`."""
+    return e2e_redact.secret_kinds("\n".join(lines).encode("utf-8"), passwords)
+
+
+@dataclass
+class SocketTracker:
+    """Counts the WebSockets the page opened and how many closed; the URL (it carries the token) is never kept."""
+
+    opened: int = 0
+    closed: int = 0
+
+    def track(self, socket: Any) -> None:
+        self.opened += 1
+        socket.on("close", lambda _socket: self.mark_closed())
+
+    def mark_closed(self) -> None:
+        self.closed += 1
+
+    def all_closed(self) -> bool:
+        return self.closed >= self.opened
+
+    def summary(self) -> str:
+        return f"opened {self.opened}, closed {self.closed}"
 
 
 def refusal_ok(status: int, content_type: str) -> bool:
@@ -113,23 +155,59 @@ def sign_in(page: Any, email: str, password: str) -> None:  # pragma: no cover -
     page.get_by_role("button", name="Log in").click()
 
 
-def use_calculator(page: Any) -> str:  # pragma: no cover - needs a browser
-    page.get_by_role("textbox", name="First Number").fill(FIRST_NUMBER)
-    page.get_by_role("textbox", name="Second Number").fill(SECOND_NUMBER)
-    page.get_by_role("button", name="+").click()
+def calculate(page: Any, first: str, second: str, symbol: str, done: Callable[[str], bool]) -> str:  # pragma: no cover
+    """Fill the fields, pick the operation, press Calculate and wait until `done(result line)` or the timeout."""
+    page.get_by_role("textbox", name="First Number").fill(first)
+    page.get_by_role("textbox", name="Second Number").fill(second)
+    page.get_by_role("button", name=symbol, exact=True).click()
     page.get_by_role("button", name="Calculate").click()
     result = page.get_by_text("Result:").first
     result.wait_for(timeout=CALCULATE_TIMEOUT_MS)
     deadline = time.monotonic() + CALCULATE_TIMEOUT_MS / 1000
     text = str(result.inner_text())
-    while not result_text_ok(text) and "Error" not in text and time.monotonic() < deadline:
+    while not done(text) and time.monotonic() < deadline:
         page.wait_for_timeout(500)
         text = str(result.inner_text())
     return text
 
 
+def use_calculator(page: Any) -> str:  # pragma: no cover - needs a browser
+    return calculate(page, FIRST_NUMBER, SECOND_NUMBER, "+", lambda text: result_text_ok(text) or "Error" in text)
+
+
+def wait_for_sockets_closed(page: Any, sockets: SocketTracker) -> None:  # pragma: no cover - needs a browser
+    deadline = time.monotonic() + STEP_TIMEOUT_MS / 1000
+    while not sockets.all_closed() and time.monotonic() < deadline:
+        page.wait_for_timeout(250)
+
+
+def run_realtime(page: Any, rec: Recorder, out: Path, sockets: SocketTracker) -> None:  # pragma: no cover
+    """Real-time mode: connect, 6 x 7 = 42, 1 / 0 shows the divide-by-zero text (socket checks run after log out)."""
+    page.get_by_role("button", name=REALTIME_MODE_LABEL).click()
+    chip = status_semantics_label(CONNECTED)
+    page.get_by_text(chip, exact=True).or_(page.get_by_label(chip, exact=True)).first.wait_for(timeout=STEP_TIMEOUT_MS)
+    rec.check("real-time mode shows Connected", True)
+    page.screenshot(path=out / "05-realtime-connected.png")
+
+    text = calculate(page, "6", "7", "×", lambda t: result_text_ok(t, "42"))
+    rec.check("real-time 6 x 7 shows 42", result_text_ok(text, "42"), text.replace("\n", " ")[:80])
+    page.screenshot(path=out / "06-realtime-product.png")
+
+    text = calculate(page, "1", "0", "÷", lambda t: DIVIDE_BY_ZERO in t)
+    rec.check("real-time 1 / 0 shows the divide-by-zero text", message_shown(text, DIVIDE_BY_ZERO), text[:80])
+    page.screenshot(path=out / "07-realtime-divide-by-zero.png")
+
+
 def drive(
-    page: Any, context: Any, site: str, email: str, password: str, rec: Recorder, out: Path, require_backend: bool
+    page: Any,
+    context: Any,
+    site: str,
+    email: str,
+    password: str,
+    rec: Recorder,
+    out: Path,
+    require_backend: bool,
+    sockets: SocketTracker,
 ) -> None:  # pragma: no cover
     page.goto(site, wait_until="load")
     enable_semantics(page)
@@ -156,9 +234,13 @@ def drive(
         rec.note("calculation shows the expected result (backend)", result_text_ok(text), shown)
     page.screenshot(path=out / "03-result.png")
 
+    run_realtime(page, rec, out, sockets)
+
     page.get_by_role("button", name="Log out").click()
     login.wait_for(timeout=STEP_TIMEOUT_MS)
     rec.check("signed out (login page shown again)", True)
+    wait_for_sockets_closed(page, sockets)
+    rec.check("real-time socket closed after log out", sockets.opened > 0 and sockets.all_closed(), sockets.summary())
     page.screenshot(path=out / "04-signed-out.png")
 
     response = context.request.post(
@@ -220,8 +302,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a br
         context = browser.new_context(no_viewport=True)
         context.tracing.start(screenshots=True, snapshots=False, sources=False)
         page = context.new_page()
+        sockets = SocketTracker()
+        console: list[str] = []
+        page.on("console", lambda message: console.append(str(message.text)))
+        page.on("pageerror", lambda error: console.append(str(error)))
+        page.on("websocket", lambda socket: sockets.track(socket))
         try:
-            drive(page, context, site, args.email, password, rec, run_dir, args.require_backend)
+            drive(page, context, site, args.email, password, rec, run_dir, args.require_backend, sockets)
         except Exception as error:  # noqa: BLE001 - a failed step is a failed check, not a crash
             rec.check("run completed without exception", False, type(error).__name__)
             page.screenshot(path=run_dir / "failure.png")
@@ -233,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a br
     e2e_redact.redact_trace(run_dir / "trace.zip", passwords)
     found = e2e_redact.scan_folder(run_dir, passwords)
     rec.check("no secrets in the run folder", not found, ", ".join(sorted(found))[:200])
+    leaks = console_leaks(console, passwords)
+    rec.check("no token or token= in the browser console", not leaks, ", ".join(leaks))
     data = rec.save()
     print(json.dumps({k: data[k] for k in ("checks", "informational", "passed")}, indent=2))
     return 0 if data["passed"] else 1

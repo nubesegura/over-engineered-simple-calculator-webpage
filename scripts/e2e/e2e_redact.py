@@ -17,16 +17,25 @@ ACCOUNT_ID = re.compile(rb"(?<![\w.-])\d{12}(?![\w.-])")
 # Header objects in a Playwright trace: {"name":"Set-Cookie","value":"..."}
 SECRET_HEADER = re.compile(rb'("name":"(?:[Ss]et-)?[Cc]ookie"|"name":"[Aa]uthorization")(,"value":")[^"]*(")')
 COOKIE_PAIR = re.compile(rb"(?i)((?:refresh|id|access)[\w-]*token=)[^;\s\"]+")
+# A parameter named exactly `token` in a URL query (after ?, & or ;, JSON-escaped ampersand, `%3D` for the equals).
+# `csrf_token=`, `next_page_token=` or `foo.token=` do not match: the name must follow the query delimiter.
+_TOKEN_PARAM = rb"((?:[?&;]|\\u0026)token(?:=|%3[dD]))"
+TOKEN_QUERY = re.compile(rb"(?i)" + _TOKEN_PARAM + rb"(?!<redacted>)")
+TOKEN_VALUE = re.compile(rb"(?i)" + _TOKEN_PARAM + rb"[^&;\s\"'\\]+")
+RESOURCES_PREFIX = "resources/"
 TEXT_SUFFIXES = {".log", ".json", ".jsonl", ".txt", ".trace", ".network", ".md"}
 PLACEHOLDER = b"<redacted>"
 
 
 def redact_bytes(data: bytes, passwords: list[str]) -> bytes:
-    """Mask passwords, JWTs, cookie/authorization header values and token cookies."""
+    """Mask passwords, JWTs, cookie/authorization header values, token cookies and `token=` query values."""
     for password in passwords:
         if password:
             data = data.replace(password.encode("utf-8"), b"<password>")
-    data = JWT.sub(b"<jwt>", data)
+    return TOKEN_VALUE.sub(rb"\1" + PLACEHOLDER, _mask_credentials(JWT.sub(b"<jwt>", data)))
+
+
+def _mask_credentials(data: bytes) -> bytes:
     data = SECRET_HEADER.sub(rb"\1\2" + PLACEHOLDER + rb"\3", data)
     return COOKIE_PAIR.sub(rb"\1" + PLACEHOLDER, data)
 
@@ -47,7 +56,10 @@ def secret_kinds(data: bytes, passwords: list[str]) -> list[str]:
         kinds.append("password")
     if JWT.search(data):
         kinds.append("jwt")
-    if redact_bytes(data, []) != JWT.sub(b"<jwt>", data):
+    if TOKEN_QUERY.search(data):
+        kinds.append("token-query")
+    jwt_masked = JWT.sub(b"<jwt>", data)
+    if _mask_credentials(jwt_masked) != jwt_masked:
         kinds.append("cookie-or-authorization-header")
     return kinds
 
@@ -55,7 +67,11 @@ def secret_kinds(data: bytes, passwords: list[str]) -> list[str]:
 def _members(path: Path) -> list[tuple[str, bytes]]:
     if path.suffix == ".zip":
         with zipfile.ZipFile(path) as archive:
-            return [(f"{path.name}!{info.filename}", archive.read(info)) for info in archive.infolist()]
+            return [
+                (f"{path.name}!{info.filename}", archive.read(info))
+                for info in archive.infolist()
+                if not info.filename.startswith(RESOURCES_PREFIX)
+            ]
     if path.suffix in TEXT_SUFFIXES:
         return [(path.name, path.read_bytes())]
     return []
