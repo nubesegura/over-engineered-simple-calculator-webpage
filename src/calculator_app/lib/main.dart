@@ -10,6 +10,10 @@ import 'auth/auth_api.dart';
 import 'auth/login_page.dart';
 import 'auth/session_controller.dart';
 import 'constants.dart';
+import 'live_history/live_history_config.dart';
+import 'live_history/live_history_constants.dart';
+import 'live_history/live_history_controller.dart';
+import 'live_history/live_history_status_chip.dart';
 import 'realtime/realtime_address.dart';
 import 'realtime/realtime_calculator_client.dart';
 import 'realtime/realtime_channel.dart';
@@ -34,6 +38,8 @@ class CalculatorApp extends StatefulWidget {
     this.stopwatchFactory,
     this.realtimeAddress,
     this.realtimeChannels,
+    this.liveHistoryConfig,
+    this.liveHistoryController,
   });
 
   /// Stopwatch factory for the response time; only injected by tests.
@@ -44,6 +50,12 @@ class CalculatorApp extends StatefulWidget {
 
   /// Opens the real-time connections; only injected by tests.
   final RealtimeChannelFactory? realtimeChannels;
+
+  /// AppSync Live History configuration; read from build settings when null.
+  final LiveHistoryConfig? liveHistoryConfig;
+
+  /// Live calculation history controller; only injected by tests.
+  final LiveHistoryController? liveHistoryController;
 
   /// Client for the calculator backends.
   final http.Client? httpClient;
@@ -111,6 +123,8 @@ class _CalculatorAppState extends State<CalculatorApp> {
           apiBaseUrl: widget.apiBaseUrl ?? deriveApiBaseUrl(),
           realtimeAddress: widget.realtimeAddress,
           realtimeChannels: widget.realtimeChannels,
+          liveHistoryConfig: widget.liveHistoryConfig,
+          liveHistoryController: widget.liveHistoryController,
         );
     }
   }
@@ -125,11 +139,19 @@ class CalculatorHomePage extends StatefulWidget {
     this.stopwatchFactory = Stopwatch.new,
     this.realtimeAddress,
     this.realtimeChannels,
+    this.liveHistoryConfig,
+    this.liveHistoryController,
   });
 
   /// Real-time address; read from the build setting when null.
   final RealtimeAddress? realtimeAddress;
   final RealtimeChannelFactory? realtimeChannels;
+
+  /// AppSync Live History configuration; read from build settings when null.
+  final LiveHistoryConfig? liveHistoryConfig;
+
+  /// Live calculation history controller; only injected by tests.
+  final LiveHistoryController? liveHistoryController;
 
   /// Creates the monotonic stopwatch of one calculation; tests inject a fake.
   final Stopwatch Function() stopwatchFactory;
@@ -157,6 +179,10 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   late final RealtimeController _realtime;
   bool _realtimeMode = false;
 
+  /// Live calculation history controller when AppSync Live History is configured.
+  LiveHistoryController? _liveHistory;
+  bool _ownsLiveHistory = false;
+
   /// True while the shown outcome is "not connected": offers the REST action.
   bool _offerRestFallback = false;
 
@@ -180,11 +206,40 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
       address: widget.realtimeAddress ?? RealtimeAddress.fromEnvironment(),
       channels: widget.realtimeChannels,
     )..addListener(_onRealtimeChanged);
+    final injectedLiveHistory = widget.liveHistoryController;
+    final liveConfig =
+        widget.liveHistoryConfig ?? LiveHistoryConfig.fromEnvironment();
+    if (injectedLiveHistory != null) {
+      _liveHistory = injectedLiveHistory..addListener(_onLiveHistoryChanged);
+      _ownsLiveHistory = false;
+    } else if (liveConfig.isConfigured) {
+      _liveHistory = LiveHistoryController(
+        config: liveConfig,
+        tokens: widget.session,
+        channels: widget.realtimeChannels,
+        httpClient: widget.httpClient,
+      )..addListener(_onLiveHistoryChanged);
+      _ownsLiveHistory = true;
+    }
+    widget.session.addListener(_onSessionChanged);
+    if (_liveHistory != null) {
+      unawaited(_liveHistory!.start());
+    }
     WidgetsBinding.instance.addObserver(this);
   }
 
   void _onRealtimeChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _onLiveHistoryChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onSessionChanged() {
+    if (widget.session.state != SessionState.authenticated) {
+      _liveHistory?.resetForLogout();
+    }
   }
 
   @override
@@ -195,6 +250,16 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.session.removeListener(_onSessionChanged);
+    final liveHistory = _liveHistory;
+    if (liveHistory != null) {
+      liveHistory.removeListener(_onLiveHistoryChanged);
+      if (_ownsLiveHistory) {
+        liveHistory.dispose();
+      } else {
+        liveHistory.resetForLogout();
+      }
+    }
     _realtime
       ..removeListener(_onRealtimeChanged)
       ..dispose();
@@ -365,7 +430,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   /// The history is eventually consistent: wait a moment before reloading it. Only
   /// done when the user already opened the history, to avoid extra API calls.
   void _scheduleHistoryRefresh() {
-    if (!_historyLoaded) return;
+    if (_liveHistory != null || !_historyLoaded) return;
     _historyRefreshTimer?.cancel();
     _historyRefreshTimer = Timer(ApiConstants.historyRefreshDelay, () {
       if (mounted) _loadHistory();
@@ -430,7 +495,101 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
         '${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)}';
   }
 
+  Widget _buildLiveHistory(
+    BuildContext context,
+    LiveHistoryController liveController,
+  ) {
+    final errorStyle = TextStyle(color: Theme.of(context).colorScheme.error);
+    final Widget body;
+    if (liveController.items.isEmpty) {
+      body = liveController.errorMessage != null
+          ? Text(liveController.errorMessage!, style: errorStyle)
+          : const Text(LiveHistoryConstants.emptyHistoryMessage);
+    } else {
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (liveController.errorMessage != null)
+            Text(liveController.errorMessage!, style: errorStyle),
+          for (final item in liveController.items)
+            ListTile(
+              key: Key('history-${item.txId}'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                '${item.a} ${item.symbol} ${item.b} = ${item.displayOutcome}',
+                style: const TextStyle(fontSize: 18),
+              ),
+              subtitle:
+                  Text('${_formatTime(item.occurredAt)} · ${item.transport}'),
+            ),
+          if (liveController.hasMore)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                key: const Key('history-load-more'),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(64, kRealtimeTouchTarget),
+                ),
+                onPressed: liveController.isLoading
+                    ? null
+                    : () => unawaited(liveController.loadMore()),
+                child: const Text(LiveHistoryConstants.loadMoreLabel),
+              ),
+            ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  Text(
+                    LiveHistoryConstants.historyTitle,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  LiveHistoryStatusChip(status: liveController.status),
+                ],
+              ),
+            ),
+            if (liveController.isLoading)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            IconButton(
+              key: const Key('history-refresh'),
+              style: IconButton.styleFrom(
+                minimumSize:
+                    const Size(kRealtimeTouchTarget, kRealtimeTouchTarget),
+              ),
+              tooltip: LiveHistoryConstants.refreshTooltip,
+              icon: const Icon(Icons.refresh),
+              onPressed: liveController.isLoading
+                  ? null
+                  : () => unawaited(liveController.refresh()),
+            ),
+          ],
+        ),
+        body,
+      ],
+    );
+  }
+
   Widget _buildHistory(BuildContext context) {
+    final liveController = _liveHistory;
+    if (liveController != null) {
+      return _buildLiveHistory(context, liveController);
+    }
     final textTheme = Theme.of(context).textTheme;
     final Widget body;
     if (_historyError != null) {

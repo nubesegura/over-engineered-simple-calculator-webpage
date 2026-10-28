@@ -28,5 +28,5 @@ abstract interface class RealtimeChannel {
 /// Opens connections. Throws [RealtimeChannelException] when it cannot: any
 /// failed upgrade (401, 403, 500, any non-101 answer) is `refused`.
 abstract interface class RealtimeChannelFactory {
-  Future<RealtimeChannel> connect(Uri uri);
+  Future<RealtimeChannel> connect(Uri uri, {Iterable<String>? protocols});
 }

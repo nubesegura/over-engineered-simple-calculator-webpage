@@ -73,12 +73,20 @@ class FakeChannelFactory implements RealtimeChannelFactory {
 
   final List<Object> _script;
   final List<Uri> uris = [];
+  final List<List<String>?> connectedProtocols = [];
+
+  List<String>? get lastProtocols =>
+      connectedProtocols.isEmpty ? null : connectedProtocols.last;
 
   void add(Object outcome) => _script.add(outcome);
 
   @override
-  Future<RealtimeChannel> connect(Uri uri) async {
+  Future<RealtimeChannel> connect(
+    Uri uri, {
+    Iterable<String>? protocols,
+  }) async {
     uris.add(uri);
+    connectedProtocols.add(protocols == null ? null : List.of(protocols));
     final next = _script.isEmpty
         ? const RealtimeChannelException(RealtimeFailure.refused)
         : _script.removeAt(0);

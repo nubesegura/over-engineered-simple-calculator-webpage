@@ -370,3 +370,130 @@ def test_alarm_states_marks_missing() -> None:
             return {"MetricAlarms": [{"AlarmName": "a", "StateValue": "OK"}]}
 
     assert collect_logs.alarm_states(Cw(), ["a", "b"]) == {"a": "OK", "b": "NOT_FOUND"}
+
+
+# --- live history redaction and E2E helpers ----------------------------------------------------------------------
+
+FAKE_HEADER_SUBPROTOCOL = "header-eyJob3N0IjoiZXhhbXBsZSIsIkF1dGhvcml6YXRpb24iOiJ0b2tlbiJ9"
+FAKE_APPSYNC_REALTIME_URL = "wss://example.appsync-realtime-api.us-east-2.amazonaws.com/event/realtime"
+FAKE_APPSYNC_API_URL = "https://example.appsync-api.us-east-2.amazonaws.com/graphql"
+
+
+def test_redact_sensitive_and_contains_leaked_secret_for_appsync_header_subprotocol() -> None:
+    raw = (
+        f"subprotocols=['aws-appsync-event-ws', '{FAKE_HEADER_SUBPROTOCOL}'] "
+        f"url={FAKE_APPSYNC_REALTIME_URL} graphql={FAKE_APPSYNC_API_URL} "
+        f'{{"name":"Sec-WebSocket-Protocol","value":"aws-appsync-event-ws, {FAKE_HEADER_SUBPROTOCOL}"}}'
+    )
+    assert e2e_redact.contains_leaked_secret(raw) is True
+    assert "appsync-header-subprotocol" in e2e_redact.secret_kinds(raw.encode("utf-8"), [])
+
+    redacted = e2e_redact.redact_sensitive(raw)
+    assert FAKE_HEADER_SUBPROTOCOL not in redacted
+    assert "header-<redacted>" in redacted
+    assert "wss://<redacted-appsync-realtime>" in redacted
+    assert "https://<redacted-appsync-api>" in redacted
+    assert e2e_redact.contains_leaked_secret(redacted) is False
+    assert e2e_redact.secret_kinds(redacted.encode("utf-8"), []) == []
+
+
+def test_console_leaks_and_scan_folder_flag_raw_header_subprotocol(tmp_path: Path) -> None:
+    assert web_driver.console_leaks([f"ws {FAKE_HEADER_SUBPROTOCOL}"], []) == ["appsync-header-subprotocol"]
+    assert web_driver.console_leaks(["ws header-<redacted>", "header-short"], []) == []
+
+    net_file = tmp_path / "0-trace.network"
+    net_file.write_text(f"protocols: {FAKE_HEADER_SUBPROTOCOL}", encoding="utf-8")
+    assert e2e_redact.scan_folder(tmp_path, []) == {"0-trace.network": ["appsync-header-subprotocol"]}
+    net_file.write_bytes(e2e_redact.redact_bytes(net_file.read_bytes(), []))
+    assert e2e_redact.scan_folder(tmp_path, []) == {}
+
+
+class _FakeLocator:
+    def __init__(self, should_fail: bool = False, count_value: int = 0) -> None:
+        self.should_fail = should_fail
+        self.count_value = count_value
+        self.timeouts: list[int] = []
+
+    @property
+    def first(self) -> _FakeLocator:
+        return self
+
+    def or_(self, other: _FakeLocator) -> _FakeLocator:
+        return _FakeLocator(
+            should_fail=self.should_fail and other.should_fail,
+            count_value=max(self.count_value, other.count_value),
+        )
+
+    def wait_for(self, timeout: int = 0) -> None:
+        self.timeouts.append(timeout)
+        if self.should_fail:
+            raise TimeoutError("timed out")
+
+    def count(self) -> int:
+        return self.count_value
+
+
+class _FakeLiveHistoryPage:
+    def __init__(
+        self,
+        missing_texts: set[str] | None = None,
+        chip_count: int = 0,
+    ) -> None:
+        self.missing_texts = missing_texts or set()
+        self.chip_count = chip_count
+        self.screenshots: list[Path] = []
+        self.queried_texts: list[str] = []
+
+    def get_by_text(self, text: str, exact: bool = False) -> _FakeLocator:
+        self.queried_texts.append(text)
+        return _FakeLocator(should_fail=text in self.missing_texts)
+
+    def get_by_label(self, label: str, exact: bool = False) -> _FakeLocator:
+        self.queried_texts.append(label)
+        return _FakeLocator(should_fail=label in self.missing_texts)
+
+    def locator(self, selector: str) -> _FakeLocator:
+        assert selector == '[aria-label^="Live history status:"]'
+        return _FakeLocator(count_value=self.chip_count)
+
+    def screenshot(self, path: Path) -> None:
+        self.screenshots.append(path)
+
+
+def test_live_history_semantics_label() -> None:
+    assert web_driver.live_history_semantics_label("Live") == "Live history status: Live"
+
+
+def test_wait_for_live_history_status_records_connected_and_not_configured(tmp_path: Path) -> None:
+    rec = web_driver.Recorder(tmp_path / "ok", [PASSWORD])
+    page = _FakeLiveHistoryPage()
+    assert web_driver.wait_for_live_history_status(page, rec) is True
+    assert rec.checks["live_history_connected"] is True
+
+    rec_unconfigured = web_driver.Recorder(tmp_path / "unconfigured", [PASSWORD])
+    missing = {"Live", "Live history status: Live"}
+    page_unconfigured = _FakeLiveHistoryPage(missing_texts=missing, chip_count=0)
+    assert web_driver.wait_for_live_history_status(page_unconfigured, rec_unconfigured) is False
+    assert "live_history_connected" not in rec_unconfigured.checks
+    assert rec_unconfigured.informational["live_history_connected"] is False
+
+    rec_failed = web_driver.Recorder(tmp_path / "failed", [PASSWORD])
+    page_configured = _FakeLiveHistoryPage(missing_texts=missing, chip_count=1)
+    assert web_driver.wait_for_live_history_status(page_configured, rec_failed) is False
+    assert rec_failed.checks["live_history_connected"] is False
+
+
+def test_verify_live_history_auto_updated_checks_rows_and_transport(tmp_path: Path) -> None:
+    rec = web_driver.Recorder(tmp_path / "updated", [PASSWORD])
+    page = _FakeLiveHistoryPage()
+    assert web_driver.verify_live_history_auto_updated(page, rec, tmp_path) is True
+    assert rec.checks["live_history_auto_updated"] is True
+    assert page.screenshots == [tmp_path / "08-live-history-updated.png"]
+    assert web_driver.LIVE_HISTORY_PRODUCT_ROW in page.queried_texts
+    assert web_driver.LIVE_HISTORY_DIVIDE_BY_ZERO_ROW in page.queried_texts
+    assert web_driver.LIVE_HISTORY_WEBSOCKET_SUBTITLE in page.queried_texts
+
+    rec_missing = web_driver.Recorder(tmp_path / "missing", [PASSWORD])
+    page_missing = _FakeLiveHistoryPage(missing_texts={web_driver.LIVE_HISTORY_DIVIDE_BY_ZERO_ROW})
+    assert web_driver.verify_live_history_auto_updated(page_missing, rec_missing, tmp_path) is False
+    assert rec_missing.checks["live_history_auto_updated"] is False

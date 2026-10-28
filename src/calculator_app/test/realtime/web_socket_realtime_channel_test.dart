@@ -46,7 +46,8 @@ void main() {
   test('a ready socket becomes a channel that sends and receives text',
       () async {
     final stub = _StubChannel();
-    final factory = WebSocketRealtimeChannelFactory(connector: (_) => stub);
+    final factory =
+        WebSocketRealtimeChannelFactory(connector: (_, {protocols}) => stub);
     final channel =
         await factory.connect(Uri.parse('wss://example.invalid/dev'));
 
@@ -65,23 +66,48 @@ void main() {
     await done.future;
   });
 
+  test('forwards WebSocket subprotocols to the connector', () async {
+    final stub = _StubChannel();
+    Uri? seenUri;
+    Iterable<String>? seenProtocols;
+    final factory = WebSocketRealtimeChannelFactory(
+      connector: (uri, {protocols}) {
+        seenUri = uri;
+        seenProtocols = protocols;
+        return stub;
+      },
+    );
+    await factory.connect(
+      Uri.parse('wss://example.invalid/event/realtime'),
+      protocols: const ['aws-appsync-event-ws', 'header-abc'],
+    );
+    expect(seenUri.toString(), 'wss://example.invalid/event/realtime');
+    expect(seenProtocols, ['aws-appsync-event-ws', 'header-abc']);
+  });
+
   test('close uses the normal closure code', () async {
     final stub = _StubChannel();
-    final channel =
-        await WebSocketRealtimeChannelFactory(connector: (_) => stub)
-            .connect(Uri.parse('wss://example.invalid/dev'));
+    final channel = await WebSocketRealtimeChannelFactory(
+      connector: (_, {protocols}) => stub,
+    ).connect(Uri.parse('wss://example.invalid/dev'));
     await channel.close();
     expect(stub.stubSink.closeCode, 1000);
   });
 
-  test('a failed upgrade is refused and carries no address', () async {
+  test('a failed upgrade is refused and carries no address or protocols',
+      () async {
     final stub = _StubChannel(ready: Future<void>.error(StateError('403')));
-    final factory = WebSocketRealtimeChannelFactory(connector: (_) => stub);
+    final factory =
+        WebSocketRealtimeChannelFactory(connector: (_, {protocols}) => stub);
     await expectLater(
-      factory.connect(Uri.parse('wss://example.invalid/dev?token=abc')),
+      factory.connect(
+        Uri.parse('wss://example.invalid/dev?token=abc'),
+        protocols: const ['aws-appsync-event-ws', 'header-secrettoken'],
+      ),
       throwsA(isA<RealtimeChannelException>()
           .having((e) => e.failure, 'failure', RealtimeFailure.refused)
-          .having((e) => e.toString(), 'text', isNot(contains('example')))),
+          .having((e) => e.toString(), 'text', isNot(contains('example')))
+          .having((e) => e.toString(), 'text', isNot(contains('secrettoken')))),
     );
     expect(stub.stubSink.closeCode, 1000);
   });
@@ -89,7 +115,7 @@ void main() {
   test('a socket that never opens times out', () async {
     final stub = _StubChannel(ready: Completer<void>().future);
     final factory = WebSocketRealtimeChannelFactory(
-      connector: (_) => stub,
+      connector: (_, {protocols}) => stub,
       connectTimeout: const Duration(milliseconds: 10),
     );
     await expectLater(
@@ -101,7 +127,7 @@ void main() {
 
   test('a connector that throws is an invalid address', () async {
     final factory = WebSocketRealtimeChannelFactory(
-      connector: (_) => throw ArgumentError('bad'),
+      connector: (_, {protocols}) => throw ArgumentError('bad'),
     );
     await expectLater(
       factory.connect(Uri.parse('wss://example.invalid/dev')),

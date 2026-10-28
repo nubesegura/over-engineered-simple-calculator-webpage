@@ -41,19 +41,30 @@ ffmpeg must be on the PATH for `--record` (Windows screen capture, `recorder.py`
 The driver rescans the whole run folder for secrets at the end (check "no secrets in the run folder"); the collector
 fails its check "no secrets in logs" if a password or JWT is found in the raw logs. Treat either failure as a finding.
 
-## Real-time (WebSocket) steps
+## Real-time (WebSocket) and Live History steps
+
+After sign-in, when AppSync Live History (`EVENTS_REALTIME_DOMAIN`, `EVENTS_HTTP_DOMAIN`, `GRAPHQL_URL`) is configured
+on the `dev` page (or `--require-live-history` is given), the driver waits up to 10 seconds for the History section to
+display the `Live` status badge (`Live history status: Live`, check `live_history_connected`).
 
 After the REST calculation the driver chooses `Real-time (WebSocket)`, waits for the chip `Connection status: Connected`,
-calculates 6 x 7 (expects 42) and 1 / 0 (expects `Result: Cannot divide by zero.`), logs out and checks that every
-WebSocket the page opened is closed (the socket URL carries the token, so only counts are logged). The REST calculation
-stays informational unless `--require-backend` is given (7.5); the real-time checks always decide the run.
-Selectors use the app labels: `Real-time (WebSocket)`, `Connection status: <status>`, `×`, `÷`, `Result:`.
+calculates 6 x 7 (expects 42) and 1 / 0 (expects `Result: Cannot divide by zero.`), and—when live history is active—verifies
+within 3 seconds (`timeout=3000`) that the History section automatically displays both rows (`6 × 7 = 42` and
+`1 ÷ 0 = Cannot divide by zero.`) with a `· websocket` transport subtitle without clicking the `Refresh history` button
+(check `live_history_auto_updated`). It then logs out and checks that every WebSocket the page opened is closed (the
+socket URL or subprotocol carries auth material, so only counts are logged). The REST calculation stays informational
+unless `--require-backend` is given (7.5); the real-time and configured live-history checks always decide the run.
+Selectors use the app labels: `Real-time (WebSocket)`, `Connection status: <status>`, `Live`, `Live history status: <status>`,
+`×`, `÷`, `Result:`.
 
-Token checks (fail the run if found): the browser console lines are searched for a password, a JWT or a `token=` query
-parameter (check "no token or token= in the browser console"). The trace is redacted first (a `?token=<value>` value
-becomes `<redacted>`), then the run folder scan fails on any `token=` query value that is still unmasked (check "no secrets
-in the run folder"); the compiled app files stored under `resources/` in the trace are not scanned. Only a parameter named
-exactly `token` counts (`csrf_token=` and similar do not). CloudWatch logs are checked by `collect_logs.py` (JWT and password).
+Token and subprotocol checks (fail the run if found): the browser console lines are searched for a password, a JWT, a
+`token=` query parameter, or an AppSync Events `header-<base64url>` auth subprotocol (check "no token or token= in the
+browser console"). The trace is redacted first (`?token=<value>` becomes `<redacted>`, `header-<base64url>` becomes
+`header-<redacted>`, and `wss://*.appsync-realtime-api.*` becomes `wss://<redacted-appsync-realtime>`), then the run
+folder scan fails on any `token=` query value or `header-<base64url>` subprotocol that is still unmasked (check "no
+secrets in the run folder"); the compiled app files stored under `resources/` in the trace are not scanned. Only a
+parameter named exactly `token` counts (`csrf_token=` and similar do not). CloudWatch logs are checked by
+`collect_logs.py` (JWT and password).
 
 ## Notes
 

@@ -39,6 +39,13 @@ STEP_TIMEOUT_MS = 20_000
 CALCULATE_TIMEOUT_MS = 20_000
 REALTIME_MODE_LABEL = "Real-time (WebSocket)"
 CONNECTED = "Connected"
+LIVE_HISTORY_LIVE = "Live"
+LIVE_HISTORY_CONNECTING = "Connecting"
+LIVE_HISTORY_TIMEOUT_MS = 10_000
+LIVE_HISTORY_UPDATE_TIMEOUT_MS = 3_000
+LIVE_HISTORY_PRODUCT_ROW = "6 × 7 = 42"
+LIVE_HISTORY_DIVIDE_BY_ZERO_ROW = "1 ÷ 0 = Cannot divide by zero."
+LIVE_HISTORY_WEBSOCKET_SUBTITLE = "· websocket"
 DIVIDE_BY_ZERO = "Cannot divide by zero."
 
 
@@ -72,14 +79,65 @@ def status_semantics_label(status: str) -> str:
     return f"Connection status: {status}"
 
 
+def live_history_semantics_label(status: str = LIVE_HISTORY_LIVE) -> str:
+    """Accessible name of the live-history status chip (LiveHistoryConstants.statusSemanticsLabel in the app)."""
+    return f"Live history status: {status}"
+
+
 def message_shown(text: str, message: str) -> bool:
     """True when the result line is `Result: <message>` (the app shows real-time errors in the result line)."""
     return text.strip().startswith("Result:") and message in text
 
 
 def console_leaks(lines: list[str], passwords: list[str]) -> list[str]:
-    """Kinds of secret (never values) found in the browser console lines: password, JWT or `token=`."""
+    """Kinds of secret (never values) found in the browser console lines: password, JWT, `token=` or `header-`."""
     return e2e_redact.secret_kinds("\n".join(lines).encode("utf-8"), passwords)
+
+
+def wait_for_live_history_status(
+    page: Any,
+    rec: Recorder,
+    require_live_history: bool = False,
+) -> bool:
+    """Wait up to 10s for the History section to reach `Live` when configured (or required)."""
+    live_label = live_history_semantics_label(LIVE_HISTORY_LIVE)
+    live_locator = (
+        page.get_by_text(LIVE_HISTORY_LIVE, exact=True)
+        .or_(page.get_by_text(live_label, exact=True))
+        .or_(page.get_by_label(live_label, exact=True))
+        .first
+    )
+    try:
+        live_locator.wait_for(timeout=LIVE_HISTORY_TIMEOUT_MS)
+    except Exception as error:  # noqa: BLE001 - inspect whether live history is configured on this build
+        any_chip = page.locator('[aria-label^="Live history status:"]')
+        configured = require_live_history or int(any_chip.count()) > 0
+        if configured:
+            rec.check("live_history_connected", False, type(error).__name__)
+        else:
+            rec.note("live_history_connected", False, "not configured")
+        return False
+    rec.check("live_history_connected", True, LIVE_HISTORY_LIVE)
+    return True
+
+
+def verify_live_history_auto_updated(page: Any, rec: Recorder, out: Path | None = None) -> bool:
+    """Verify within 3s that both real-time calculations appear in History with `· websocket` without Refresh."""
+    try:
+        page.get_by_text(LIVE_HISTORY_PRODUCT_ROW).first.wait_for(timeout=LIVE_HISTORY_UPDATE_TIMEOUT_MS)
+        page.get_by_text(LIVE_HISTORY_DIVIDE_BY_ZERO_ROW).first.wait_for(timeout=LIVE_HISTORY_UPDATE_TIMEOUT_MS)
+        page.get_by_text(LIVE_HISTORY_WEBSOCKET_SUBTITLE).first.wait_for(timeout=LIVE_HISTORY_UPDATE_TIMEOUT_MS)
+    except Exception as error:  # noqa: BLE001 - report missing row or timeout as a failed check
+        rec.check("live_history_auto_updated", False, type(error).__name__)
+        return False
+    rec.check(
+        "live_history_auto_updated",
+        True,
+        f"{LIVE_HISTORY_PRODUCT_ROW}; {LIVE_HISTORY_DIVIDE_BY_ZERO_ROW} ({LIVE_HISTORY_WEBSOCKET_SUBTITLE})",
+    )
+    if out is not None:
+        page.screenshot(path=out / "08-live-history-updated.png")
+    return True
 
 
 @dataclass
@@ -181,8 +239,14 @@ def wait_for_sockets_closed(page: Any, sockets: SocketTracker) -> None:  # pragm
         page.wait_for_timeout(250)
 
 
-def run_realtime(page: Any, rec: Recorder, out: Path, sockets: SocketTracker) -> None:  # pragma: no cover
-    """Real-time mode: connect, 6 x 7 = 42, 1 / 0 shows the divide-by-zero text (socket checks run after log out)."""
+def run_realtime(
+    page: Any,
+    rec: Recorder,
+    out: Path,
+    sockets: SocketTracker,
+    live_history_active: bool = False,
+) -> None:  # pragma: no cover
+    """Real-time mode: connect, 6 x 7 = 42, 1 / 0 shows divide-by-zero, and check live history auto-update."""
     page.get_by_role("button", name=REALTIME_MODE_LABEL).click()
     chip = status_semantics_label(CONNECTED)
     page.get_by_text(chip, exact=True).or_(page.get_by_label(chip, exact=True)).first.wait_for(timeout=STEP_TIMEOUT_MS)
@@ -197,6 +261,9 @@ def run_realtime(page: Any, rec: Recorder, out: Path, sockets: SocketTracker) ->
     rec.check("real-time 1 / 0 shows the divide-by-zero text", message_shown(text, DIVIDE_BY_ZERO), text[:80])
     page.screenshot(path=out / "07-realtime-divide-by-zero.png")
 
+    if live_history_active:
+        verify_live_history_auto_updated(page, rec, out)
+
 
 def drive(
     page: Any,
@@ -208,6 +275,7 @@ def drive(
     out: Path,
     require_backend: bool,
     sockets: SocketTracker,
+    require_live_history: bool = False,
 ) -> None:  # pragma: no cover
     page.goto(site, wait_until="load")
     enable_semantics(page)
@@ -226,6 +294,8 @@ def drive(
     )
     page.screenshot(path=out / "02-calculator.png")
 
+    live_history_active = wait_for_live_history_status(page, rec, require_live_history=require_live_history)
+
     text = use_calculator(page)
     shown = text.replace("\n", " ")[:80]
     if require_backend:
@@ -234,7 +304,7 @@ def drive(
         rec.note("calculation shows the expected result (backend)", result_text_ok(text), shown)
     page.screenshot(path=out / "03-result.png")
 
-    run_realtime(page, rec, out, sockets)
+    run_realtime(page, rec, out, sockets, live_history_active=live_history_active)
 
     page.get_by_role("button", name="Log out").click()
     login.wait_for(timeout=STEP_TIMEOUT_MS)
@@ -277,6 +347,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a br
         action="store_true",
         help="fail the run when the calculation does not return the expected result (needs the dev API deployed)",
     )
+    parser.add_argument(
+        "--require-live-history",
+        action="store_true",
+        help="fail the run when the History section does not reach Live and auto-update (AppSync Events in dev)",
+    )
     parser.add_argument("--headless", action="store_true", help="no visible window (not recordable)")
     args = parser.parse_args(argv)
     env = e2e_env.require_dev(args.env)
@@ -308,7 +383,18 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - needs a br
         page.on("pageerror", lambda error: console.append(str(error)))
         page.on("websocket", lambda socket: sockets.track(socket))
         try:
-            drive(page, context, site, args.email, password, rec, run_dir, args.require_backend, sockets)
+            drive(
+                page,
+                context,
+                site,
+                args.email,
+                password,
+                rec,
+                run_dir,
+                args.require_backend,
+                sockets,
+                require_live_history=args.require_live_history,
+            )
         except Exception as error:  # noqa: BLE001 - a failed step is a failed check, not a crash
             rec.check("run completed without exception", False, type(error).__name__)
             page.screenshot(path=run_dir / "failure.png")

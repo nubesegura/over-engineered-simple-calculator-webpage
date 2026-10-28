@@ -6,24 +6,36 @@ import 'realtime_channel.dart';
 import 'realtime_constants.dart';
 
 /// Opens a [WebSocketChannel]; replaced in tests.
-typedef WebSocketConnector = WebSocketChannel Function(Uri uri);
+typedef WebSocketConnector = WebSocketChannel Function(
+  Uri uri, {
+  Iterable<String>? protocols,
+});
 
 /// Opens connections with the `web_socket_channel` package.
 class WebSocketRealtimeChannelFactory implements RealtimeChannelFactory {
   WebSocketRealtimeChannelFactory({
     WebSocketConnector? connector,
     Duration connectTimeout = RealtimeConstants.connectTimeout,
-  })  : _connector = connector ?? WebSocketChannel.connect,
+  })  : _connector = connector ?? _defaultConnect,
         _connectTimeout = connectTimeout;
 
   final WebSocketConnector _connector;
   final Duration _connectTimeout;
 
+  static WebSocketChannel _defaultConnect(
+    Uri uri, {
+    Iterable<String>? protocols,
+  }) =>
+      WebSocketChannel.connect(uri, protocols: protocols);
+
   @override
-  Future<RealtimeChannel> connect(Uri uri) async {
+  Future<RealtimeChannel> connect(
+    Uri uri, {
+    Iterable<String>? protocols,
+  }) async {
     final WebSocketChannel channel;
     try {
-      channel = _connector(uri);
+      channel = _connector(uri, protocols: protocols);
     } catch (_) {
       throw const RealtimeChannelException(RealtimeFailure.invalidAddress);
     }

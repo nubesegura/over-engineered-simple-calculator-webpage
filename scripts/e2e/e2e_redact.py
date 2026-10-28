@@ -14,25 +14,45 @@ from pathlib import Path
 
 JWT = re.compile(rb"eyJ[\w-]{10,}\.[\w-]+\.[\w-]*")
 ACCOUNT_ID = re.compile(rb"(?<![\w.-])\d{12}(?![\w.-])")
-# Header objects in a Playwright trace: {"name":"Set-Cookie","value":"..."}
-SECRET_HEADER = re.compile(rb'("name":"(?:[Ss]et-)?[Cc]ookie"|"name":"[Aa]uthorization")(,"value":")[^"]*(")')
+# Header objects in a Playwright trace: {"name":"Set-Cookie","value":"..."} or Sec-WebSocket-Protocol
+SECRET_HEADER = re.compile(
+    rb'("name":"(?:[Ss]et-)?[Cc]ookie"|"name":"[Aa]uthorization"|"name":"[Ss]ec-[Ww]eb[Ss]ocket-[Pp]rotocol")'
+    rb'(,"value":")[^"]*(")'
+)
 COOKIE_PAIR = re.compile(rb"(?i)((?:refresh|id|access)[\w-]*token=)[^;\s\"]+")
 # A parameter named exactly `token` in a URL query (after ?, & or ;, JSON-escaped ampersand, `%3D` for the equals).
 # `csrf_token=`, `next_page_token=` or `foo.token=` do not match: the name must follow the query delimiter.
 _TOKEN_PARAM = rb"((?:[?&;]|\\u0026)token(?:=|%3[dD]))"
 TOKEN_QUERY = re.compile(rb"(?i)" + _TOKEN_PARAM + rb"(?!<redacted>)")
 TOKEN_VALUE = re.compile(rb"(?i)" + _TOKEN_PARAM + rb"[^&;\s\"'\\]+")
+# AppSync Events WebSocket auth subprotocol: `header-<base64url({host, Authorization})>`.
+HEADER_SUBPROTOCOL = re.compile(rb"(?<![\w-])header-(?!<redacted>)[A-Za-z0-9_-]{20,}")
+# AppSync Events real-time WebSocket and GraphQL HTTPS endpoint URLs.
+APPSYNC_REALTIME_URL = re.compile(rb"wss?://[A-Za-z0-9.-]*\.appsync-realtime-api\.[A-Za-z0-9.-]+(?:/[^\s\"'<>\\]*)?")
+APPSYNC_API_URL = re.compile(rb"https?://[A-Za-z0-9.-]*\.appsync-api\.[A-Za-z0-9.-]+(?:/[^\s\"'<>\\]*)?")
 RESOURCES_PREFIX = "resources/"
 TEXT_SUFFIXES = {".log", ".json", ".jsonl", ".txt", ".trace", ".network", ".md"}
 PLACEHOLDER = b"<redacted>"
+HEADER_PLACEHOLDER = b"header-<redacted>"
+APPSYNC_REALTIME_PLACEHOLDER = b"wss://<redacted-appsync-realtime>"
+APPSYNC_API_PLACEHOLDER = b"https://<redacted-appsync-api>"
 
 
 def redact_bytes(data: bytes, passwords: list[str]) -> bytes:
-    """Mask passwords, JWTs, cookie/authorization header values, token cookies and `token=` query values."""
+    """Mask passwords, JWTs, headers, token cookies, `token=` query values and AppSync `header-` subprotocols."""
     for password in passwords:
         if password:
             data = data.replace(password.encode("utf-8"), b"<password>")
-    return TOKEN_VALUE.sub(rb"\1" + PLACEHOLDER, _mask_credentials(JWT.sub(b"<jwt>", data)))
+    data = JWT.sub(b"<jwt>", data)
+    data = HEADER_SUBPROTOCOL.sub(HEADER_PLACEHOLDER, data)
+    data = APPSYNC_REALTIME_URL.sub(APPSYNC_REALTIME_PLACEHOLDER, data)
+    data = APPSYNC_API_URL.sub(APPSYNC_API_PLACEHOLDER, data)
+    return TOKEN_VALUE.sub(rb"\1" + PLACEHOLDER, _mask_credentials(data))
+
+
+def redact_sensitive(text: str, passwords: list[str] | None = None) -> str:
+    """String helper around `redact_bytes` for console lines, URLs and diagnostic messages."""
+    return redact_bytes(text.encode("utf-8"), passwords or []).decode("utf-8", errors="replace")
 
 
 def _mask_credentials(data: bytes) -> bytes:
@@ -58,10 +78,17 @@ def secret_kinds(data: bytes, passwords: list[str]) -> list[str]:
         kinds.append("jwt")
     if TOKEN_QUERY.search(data):
         kinds.append("token-query")
-    jwt_masked = JWT.sub(b"<jwt>", data)
+    if HEADER_SUBPROTOCOL.search(data):
+        kinds.append("appsync-header-subprotocol")
+    jwt_masked = HEADER_SUBPROTOCOL.sub(HEADER_PLACEHOLDER, JWT.sub(b"<jwt>", data))
     if _mask_credentials(jwt_masked) != jwt_masked:
         kinds.append("cookie-or-authorization-header")
     return kinds
+
+
+def contains_leaked_secret(text: str, passwords: list[str] | None = None) -> bool:
+    """True when `text` still carries an unredacted password, JWT, `token=`, auth header or `header-` subprotocol."""
+    return bool(secret_kinds(text.encode("utf-8"), passwords or []))
 
 
 def _members(path: Path) -> list[tuple[str, bytes]]:

@@ -72,7 +72,8 @@ class _GatedFactory implements RealtimeChannelFactory {
   final Future<RealtimeChannel> _next;
 
   @override
-  Future<RealtimeChannel> connect(Uri uri) => _next;
+  Future<RealtimeChannel> connect(Uri uri, {Iterable<String>? protocols}) =>
+      _next;
 }
 
 class _SequenceFactory implements RealtimeChannelFactory {
@@ -81,7 +82,8 @@ class _SequenceFactory implements RealtimeChannelFactory {
   final List<Future<RealtimeChannel>> _results;
 
   @override
-  Future<RealtimeChannel> connect(Uri uri) => _results.removeAt(0);
+  Future<RealtimeChannel> connect(Uri uri, {Iterable<String>? protocols}) =>
+      _results.removeAt(0);
 }
 
 const String _address = 'wss://example.invalid/dev';

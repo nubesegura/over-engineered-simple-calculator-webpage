@@ -82,12 +82,19 @@ jobs:
           SUPPORT_EMAIL_SET: ${{ secrets.SUPPORT_EMAIL != '' }}
           WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
           WS_BASE_URL: ${{ vars.WS_BASE_URL }}
+          EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
+          EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
+          GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
         run: |
           missing=0
-          # Real-time mode is dev only: fail before any infrastructure step (the build step checks again).
-          if [ "$TARGET" = "prod" ] && [ -n "$WS_BASE_URL" ]; then
-            echo "::error::WS_BASE_URL must not be defined for prod (real-time mode is dev only). Remove the variable from the prod environment and from the repository scope."
-            missing=1
+          # Real-time mode and live history are dev only: fail before any infrastructure step (the build step checks again).
+          if [ "$TARGET" = "prod" ]; then
+            for dev_only in WS_BASE_URL EVENTS_REALTIME_DOMAIN EVENTS_HTTP_DOMAIN GRAPHQL_URL; do
+              if [ -n "${!dev_only}" ]; then
+                echo "::error::${dev_only} must not be defined for prod (real-time and live history are dev only). Remove the variable from the prod environment and from the repository scope."
+                missing=1
+              fi
+            done
           fi
           for name in AWS_REGION ROUTE53_ZONE_ID; do
             if [ -z "${!name}" ]; then
@@ -254,9 +261,9 @@ jobs:
           }>> "$GITHUB_STEP_SUMMARY"
 
       # The API address is derived from the host of the page (optional override: variable
-      # API_BASE_URL) and the user logs in through the BFF. The only environment-specific build
-      # input is the optional real-time address WS_BASE_URL, which exists in dev only: it is passed
-      # to the build for dev and the build fails if it is set for prod (the token travels in the URL).
+      # API_BASE_URL) and the user logs in through the BFF. The environment-specific build inputs
+      # WS_BASE_URL, EVENTS_REALTIME_DOMAIN, EVENTS_HTTP_DOMAIN, and GRAPHQL_URL exist in dev only:
+      # they are passed to the build for dev and the build fails if any of them is set for prod.
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -269,21 +276,39 @@ jobs:
         env:
           # Optional override of the API address; empty keeps the address derived from the host.
           API_BASE_URL: ${{ vars.API_BASE_URL }}
-          # Dev only (real-time mode). Never defined for prod; the value is never printed.
+          # Dev only (real-time mode and live history). Never defined for prod; the values are never printed.
           WS_BASE_URL: ${{ vars.WS_BASE_URL }}
+          EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
+          EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
+          GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
           TARGET: ${{ inputs.environment }}
         run: |
-          if [ "$TARGET" = "prod" ] && [ -n "$WS_BASE_URL" ]; then
-            echo "::error::WS_BASE_URL must not be defined for prod (real-time mode is dev only). Remove the variable from the prod environment and from the repository scope."
-            exit 1
+          if [ "$TARGET" = "prod" ]; then
+            for dev_only in WS_BASE_URL EVENTS_REALTIME_DOMAIN EVENTS_HTTP_DOMAIN GRAPHQL_URL; do
+              if [ -n "${!dev_only}" ]; then
+                echo "::error::${dev_only} must not be defined for prod (real-time and live history are dev only). Remove the variable from the prod environment and from the repository scope."
+                exit 1
+              fi
+            done
           fi
           flutter pub get
           DEFINES=()
           if [ -n "$API_BASE_URL" ]; then
             DEFINES+=("--dart-define=API_BASE_URL=$API_BASE_URL")
           fi
-          if [ "$TARGET" = "dev" ] && [ -n "$WS_BASE_URL" ]; then
-            DEFINES+=("--dart-define=WS_BASE_URL=$WS_BASE_URL")
+          if [ "$TARGET" = "dev" ]; then
+            if [ -n "$WS_BASE_URL" ]; then
+              DEFINES+=("--dart-define=WS_BASE_URL=$WS_BASE_URL")
+            fi
+            if [ -n "$EVENTS_REALTIME_DOMAIN" ]; then
+              DEFINES+=("--dart-define=EVENTS_REALTIME_DOMAIN=$EVENTS_REALTIME_DOMAIN")
+            fi
+            if [ -n "$EVENTS_HTTP_DOMAIN" ]; then
+              DEFINES+=("--dart-define=EVENTS_HTTP_DOMAIN=$EVENTS_HTTP_DOMAIN")
+            fi
+            if [ -n "$GRAPHQL_URL" ]; then
+              DEFINES+=("--dart-define=GRAPHQL_URL=$GRAPHQL_URL")
+            fi
           fi
           flutter build web --release --no-web-resources-cdn "${DEFINES[@]}"
 
