@@ -1,0 +1,24 @@
+{
+  "description": "CloudFormation stacks of this repository in deploy order (one stack per Terragrunt unit, plus the us-east-1 certificate stack). Read by scripts/cfn_deploy.py and scripts/iac_owner_guard.py. Destroy (dev only) runs the same list in reverse order. Values between stacks are passed as parameters by the deploy script (no Export/ImportValue).",
+  "repository": "over-engineered-simple-calculator-webpage",
+  "terraformStateRegion": "us-east-2",
+  "terraformStateBucketPattern": "bckt-{region_code}-tf-state-{env}-{account_id}",
+  "terraformStateKeyPattern": "{repository}/{env}/{unit}/terraform.tfstate",
+  "terraformUnits": ["edge/auth", "edge/auth-bff", "edge/frontend"],
+  "artifactsBucketParameter": "/nube-segura/account-addons/artifacts/bucket-name",
+  "artifactsPrefixPattern": "{repository}/{env}",
+  "environments": {
+    "dev": [
+      {"unit": "auth", "stack": "stk-useast2-oecalc-auth-dev", "region": "us-east-2", "template": "templates/auth.yaml", "phase": 1, "sam": false},
+      {"unit": "cert", "stack": "stk-useast1-oecalc-cert-dev", "region": "us-east-1", "template": "templates/cert.yaml", "phase": 1, "sam": false},
+      {"unit": "auth-bff", "stack": "stk-useast2-oecalc-auth-bff-dev", "region": "us-east-2", "template": "templates/auth-bff.yaml", "phase": 1, "sam": true},
+      {"unit": "frontend", "stack": "stk-useast2-oecalc-frontend-dev", "region": "us-east-2", "template": "templates/frontend.yaml", "phase": 1, "sam": false}
+    ],
+    "prod": [
+      {"unit": "auth", "stack": "stk-useast2-oecalc-auth-prod", "region": "us-east-2", "template": "templates/auth.yaml", "phase": 1, "sam": false},
+      {"unit": "cert", "stack": "stk-useast1-oecalc-cert-prod", "region": "us-east-1", "template": "templates/cert.yaml", "phase": 1, "sam": false},
+      {"unit": "auth-bff", "stack": "stk-useast2-oecalc-auth-bff-prod", "region": "us-east-2", "template": "templates/auth-bff.yaml", "phase": 1, "sam": true},
+      {"unit": "frontend", "stack": "stk-useast2-oecalc-frontend-prod", "region": "us-east-2", "template": "templates/frontend.yaml", "phase": 1, "sam": false}
+    ]
+  }
+}

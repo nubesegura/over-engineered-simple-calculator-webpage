@@ -1,0 +1,20 @@
+{
+  "Parameters": {
+    "EnvType": "prod",
+    "Context": "oecalc",
+    "RegionCode": "useast2",
+    "DomainName": "over-engineered-simple-calculator.nube-segura.com",
+    "UserPoolDeletionProtection": "ACTIVE",
+    "LogRetentionDays": "365",
+    "TracingMode": "Active",
+    "PriceClass": "PriceClass_All",
+    "WebAclArn": ""
+  },
+  "Tags": {
+    "team-owner": "nube-segura",
+    "project-name": "over-engineered-calculator",
+    "app-name": "calc-web",
+    "repo-name": "over-engineered-simple-calculator-webpage",
+    "env-type": "prod"
+  }
+}

@@ -1,0 +1,35 @@
+name: Set up IaC tooling
+description: Installs the pinned Terraform and Terragrunt versions (Terragrunt checksum-verified).
+
+inputs:
+  terraform-version:
+    description: Terraform version (must satisfy required_version in modules/*/versions.tf)
+    required: true
+  terragrunt-version:
+    description: Terragrunt version (without the leading "v")
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false # keeps `terragrunt output -raw` clean
+
+    - name: Install Terragrunt
+      shell: bash
+      env:
+        TG_VERSION: ${{ inputs.terragrunt-version }}
+      run: |
+        set -euo pipefail
+        base="https://github.com/gruntwork-io/terragrunt/releases/download/v${TG_VERSION}"
+        cd "$RUNNER_TEMP"
+        curl -fsSLo terragrunt_linux_amd64 "$base/terragrunt_linux_amd64"
+        curl -fsSLo SHA256SUMS "$base/SHA256SUMS"
+        grep " terragrunt_linux_amd64$" SHA256SUMS | sha256sum -c -
+        mkdir -p "$HOME/.local/bin"
+        install -m 0755 terragrunt_linux_amd64 "$HOME/.local/bin/terragrunt"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/terragrunt" --version

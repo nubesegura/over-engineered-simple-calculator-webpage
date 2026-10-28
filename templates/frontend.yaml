@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Frontend stack (twin of the us-east-2 part of the Terraform unit edge/frontend, files
+  modules/frontend/s3.tf, cloudfront.tf and domain.tf): private web bucket and its policy, the two origin
+  access controls, the security response headers policy, the CloudFront distribution (S3 origin and the
+  /auth/* behavior to the BFF function URL), the two CloudFront invoke permissions on the BFF function and
+  the A/AAAA alias records. The certificate is created by the us-east-1 cert stack and arrives as the
+  CertificateArn parameter. The api.<host> records and certificate belong to shared-resources (not here).
+
+Parameters:
+  EnvType:
+    Type: String
+    AllowedValues: [dev, prod]
+    Description: Environment tier; last segment of every resource name
+  Context:
+    Type: String
+    Default: oecalc
+    AllowedPattern: "^[a-z0-9]+$"
+    Description: Functional context of the project (naming convention segment)
+  RegionCode:
+    Type: String
+    AllowedPattern: "^[a-z]+[0-9]+$"
+    Description: Region of this stack without hyphens (useast2), naming convention segment
+  DomainName:
+    Type: String
+    AllowedPattern: "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    Description: Public domain name of the web page (CloudFront alias and alias records)
+  HostedZoneId:
+    Type: String
+    AllowedPattern: "^Z[A-Z0-9]{1,31}$"
+    Description: Route 53 public hosted zone of this account that contains DomainName (GitHub variable ROUTE53_ZONE_ID)
+  PriceClass:
+    Type: String
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: CloudFront price class (PriceClass_100 in dev, PriceClass_All in prod)
+  WebAclArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[A-Za-z0-9-]+$"
+    Description: >-
+      Existing WAFv2 web ACL of the CloudFront scope (us-east-1), created outside this repository (GitHub
+      variable WAF_WEB_ACL_ARN, filled by the deploy script); empty means none. Required in prod.
+  CertificateArn:
+    Type: String
+    AllowedPattern: "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]{36}$"
+    Description: ARN of the us-east-1 ACM certificate (output CertificateArn of the cert stack, checked by the deploy script)
+  BffFunctionName:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_-]{1,64}$"
+    Description: Name of the BFF function that CloudFront may invoke (output FunctionName of the auth-bff stack)
+  BffFunctionUrlHost:
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+[.]lambda-url[.][a-z0-9-]+[.]on[.]aws$"
+    Description: Host of the BFF function URL, without scheme or path (output FunctionUrlHost of the auth-bff stack)
+
+Rules:
+  ProdInvariants:
+    RuleCondition: !Equals [!Ref EnvType, prod]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref WebAclArn, ""]]
+        AssertDescription: >-
+          prod requires the shared WAFv2 web ACL: WebAclArn is empty. Set the GitHub variable WAF_WEB_ACL_ARN
+          for the prod environment.
+
+Conditions:
+  HasWebAcl: !Not [!Equals [!Ref WebAclArn, ""]]
+
+Resources:
+  # ---------------------------------------------------------
+  # Private bucket with the compiled Flutter web app; only this distribution reads it (OAC).
+  # No force_destroy equivalent: the dev destroy script empties it (dev only).
+  # ---------------------------------------------------------
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: owner-accepted exception AD-W1, prod only, rebuildable content
+    Properties:
+      BucketName: !Sub "bckt-${RegionCode}-${Context}-web-${EnvType}-${AWS::AccountId}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Every deploy overwrites the whole site: noncurrent versions expire after 30 days (Terraform
+      # noncurrent_version_retention_days default, same in dev and prod).
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+          # S3.5: refuse every request that does not use TLS.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt WebBucket.Arn
+              - !Sub "${WebBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ---------------------------------------------------------
+  # CloudFront
+  # ---------------------------------------------------------
+  WebOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "oac-${RegionCode}-${Context}-web-${EnvType}"
+        Description: !Sub "OAC of the ${Context} web page (${EnvType})"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront signs every request to the BFF function URL, so the URL can use AWS_IAM authorization.
+  BffOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "oac-${RegionCode}-${Context}-auth-bff-${EnvType}"
+        Description: !Sub "OAC of the ${Context} auth BFF function URL (${EnvType})"
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "rhp-${RegionCode}-${Context}-web-${EnvType}"
+        Comment: !Sub "Security headers of the ${Context} web page (${EnvType})"
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          # Same CSP as Terraform (design 3.12); validate in a browser in dev before prod.
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+
+  # Managed policy IDs (CloudFront Developer Guide, managed cache and origin request policies):
+  # CachingOptimized 658327ea-f89d-4fab-a63d-7e88639e58f6, CachingDisabled 4135ea2d-6df8-44a3-9df3-4b5a84be39ad,
+  # AllViewerExceptHostHeader b689b0a8-53d0-40ab-baf2-68738e2966ac (Terraform resolves them by name).
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_86
+            comment: Known gap CFD-05 (no CloudFront logging, accepted for now, pre-existing), same as Terraform
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "Web page of ${Context} (${EnvType})"
+        Enabled: true
+        IPV6Enabled: true
+        HttpVersion: http2and3
+        DefaultRootObject: index.html
+        Aliases:
+          - !Ref DomainName
+        PriceClass: !Ref PriceClass
+        WebACLId: !If [HasWebAcl, !Ref WebAclArn, !Ref "AWS::NoValue"]
+        Origins:
+          - Id: s3-web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOriginAccessControl.Id
+            # Empty OriginAccessIdentity: OAC is used instead of a legacy OAI.
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: lambda-auth-bff
+            DomainName: !Ref BffFunctionUrlHost
+            OriginAccessControlId: !GetAtt BffOriginAccessControl.Id
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        # CloudFront only allows POST with the full method set. Nothing is cached or compressed.
+        CacheBehaviors:
+          - PathPattern: /auth/*
+            TargetOriginId: lambda-auth-bff
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: false
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+        DefaultCacheBehavior:
+          TargetOriginId: s3-web
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+        # S3 answers 403 for a missing key (private bucket): serve the app shell.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 60
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 60
+        # CFD-13 accepted gap (pre-existing): no geo restriction.
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+      # Distributions have no name attribute: the convention goes in the Name tag.
+      Tags:
+        - Key: Name
+          Value: !Sub "cfd-${RegionCode}-${Context}-web-${EnvType}"
+
+  # ---------------------------------------------------------
+  # CloudFront may invoke the BFF only through its function URL and only from this distribution. Since
+  # October 2025 a function URL needs both lambda:InvokeFunctionUrl and lambda:InvokeFunction (the latter
+  # restricted to calls made through the URL). Statement IDs are generated by CloudFormation.
+  # ---------------------------------------------------------
+  BffInvokeFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BffFunctionName
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+      FunctionUrlAuthType: AWS_IAM
+
+  BffInvokeFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BffFunctionName
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+      InvokedViaFunctionUrl: true
+
+  # ---------------------------------------------------------
+  # Alias records. Z2FDTNDATAQYW2 is the fixed hosted zone ID of every CloudFront alias target.
+  # ---------------------------------------------------------
+  WebRecordA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  WebRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+Outputs:
+  BucketName:
+    Description: Bucket where the compiled Flutter web app is uploaded
+    Value: !Ref WebBucket
+  DistributionId:
+    Description: CloudFront distribution ID (cache invalidation after each deploy)
+    Value: !Ref Distribution
+  DistributionDomainName:
+    Description: CloudFront domain name of the distribution
+    Value: !GetAtt Distribution.DomainName
+  WebsiteUrl:
+    Description: Public URL of the web page
+    Value: !Sub "https://${DomainName}"

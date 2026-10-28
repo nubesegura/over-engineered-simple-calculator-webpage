@@ -1,0 +1,382 @@
+name: Deploy (reusable)
+
+# Provisions one environment (Cognito, the auth BFF function, S3 + CloudFront + ACM +
+# Route 53) with the tool chosen by the GitHub environment variable IAC_TOOL, then builds the
+# Flutter web app and publishes it. IAC_TOOL is "cloudformation" (default when unset: SAM and
+# CloudFormation through scripts/cfn_deploy.py) or "terraform" (Terragrunt). Anything else fails.
+# The owner guard (scripts/iac_owner_guard.py) runs before any plan or deploy and stops the job
+# when the environment belongs to the other tool. Called by deploy-dev.yml and deploy-prod.yml;
+# the GitHub environment of the same name provides the secrets/variables and, for prod, the
+# manual approval gate.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Target environment (dev or prod); also the GitHub environment name
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for requesting the JWT for AWS OIDC
+  contents: read # Required for actions/checkout
+
+env:
+  FLUTTER_VERSION: "3.47.5"
+  TERRAFORM_VERSION: "1.16.2"
+  TERRAGRUNT_VERSION: "1.1.5"
+  PYTHON_VERSION: "3.14"
+  SAM_CLI_VERSION: "1.158.0"
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 90
+    # Never run two applies against the same state at once (same group as destroy-dev.yml).
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      # Default cloudformation; set the variable to terraform to use Terragrunt.
+      IAC_TOOL: ${{ vars.IAC_TOOL || 'cloudformation' }}
+      # Read by env.hcl (terraform) and by scripts/cfn_deploy.py (cloudformation). SUPPORT_EMAIL
+      # (certificate alert destination) and WAF_WEB_ACL_ARN are scoped to the steps that need them.
+      ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
+      TG_NON_INTERACTIVE: "true"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate IAC_TOOL
+        run: |
+          case "$IAC_TOOL" in
+            terraform | cloudformation) echo "IaC tool: $IAC_TOOL" ;;
+            *)
+              echo "::error::Variable IAC_TOOL must be 'terraform' or 'cloudformation' (got '$IAC_TOOL')"
+              exit 1
+              ;;
+          esac
+
+      # Each environment is a different AWS account, and the branch decides which one:
+      # develop -> dev, main -> prod. A manual run from any other branch
+      # must never assume another environment's role.
+      - name: Validate branch for the environment
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          case "$TARGET:$GITHUB_REF" in
+            dev:refs/heads/develop | prod:refs/heads/main) ;;
+            *)
+              echo "::error::Branch $GITHUB_REF cannot deploy the '$TARGET' environment"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate environment configuration
+        env:
+          TARGET: ${{ inputs.environment }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ROLE_ARN_SET: ${{ secrets.ROLE_ARN != '' }}
+          AWS_ACCOUNT_ID_SET: ${{ secrets.AWS_ACCOUNT_ID != '' }}
+          SUPPORT_EMAIL_SET: ${{ secrets.SUPPORT_EMAIL != '' }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+          WS_BASE_URL: ${{ vars.WS_BASE_URL }}
+          EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
+          EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
+          GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL }}
+        run: |
+          missing=0
+          # Real-time mode and live history are dev only: fail before any infrastructure step (the build step checks again).
+          if [ "$TARGET" = "prod" ]; then
+            for dev_only in WS_BASE_URL EVENTS_REALTIME_DOMAIN EVENTS_HTTP_DOMAIN GRAPHQL_URL; do
+              if [ -n "${!dev_only}" ]; then
+                echo "::error::${dev_only} must not be defined for prod (real-time and live history are dev only). Remove the variable from the prod environment and from the repository scope."
+                missing=1
+              fi
+            done
+            if [ -n "$AI_API_BASE_URL" ] && echo "$AI_API_BASE_URL" | grep -q "\.dev\."; then
+              echo "::error::AI_API_BASE_URL for prod cannot point to dev domain"
+              missing=1
+            fi
+          fi
+          for name in AWS_REGION ROUTE53_ZONE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable '$name' is not set in the '$TARGET' GitHub environment"
+              missing=1
+            fi
+          done
+          for secret in ROLE_ARN AWS_ACCOUNT_ID SUPPORT_EMAIL; do
+            flag="${secret}_SET"
+            if [ "${!flag}" != "true" ]; then
+              echo "::error::Secret '$secret' is not set in the '$TARGET' GitHub environment"
+              missing=1
+            fi
+          done
+          # prod must be behind an existing web ACL (created outside this repository).
+          if [ "$TARGET" = "prod" ] && [ -z "$WAF_WEB_ACL_ARN" ]; then
+            echo "::error::Variable 'WAF_WEB_ACL_ARN' is not set in the 'prod' GitHub environment (ARN of an existing WAFv2 web ACL, CloudFront scope, us-east-1)"
+            missing=1
+          fi
+          [ "$missing" -eq 0 ] || exit 1
+          # Terraform only: the provider region comes from env.hcl and the credentials must target the same one.
+          if [ "$IAC_TOOL" = "terraform" ] && ! grep -qE "^\s*aws_region\s*=\s*\"$AWS_REGION\"" environments/$TARGET/env.hcl; then
+            echo "::error file=environments/$TARGET/env.hcl::AWS_REGION ($AWS_REGION) does not match aws_region in env.hcl"
+            exit 1
+          fi
+
+      # Installs run before the AWS credentials exist, so no package code sees them.
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: scripts/requirements-dev.txt
+
+      - name: Install script dependencies
+        run: pip install -r scripts/requirements-dev.txt
+
+      # SAM CLI pins its own boto3, so it lives in a separate venv and only the sam executable is
+      # put on PATH (scripts/cfn_deploy.py keeps the boto3 of requirements-dev.txt).
+      - name: Setup SAM CLI
+        if: env.IAC_TOOL == 'cloudformation'
+        run: |
+          python -m venv "$RUNNER_TEMP/sam-venv"
+          "$RUNNER_TEMP/sam-venv/bin/python" -m pip install --disable-pip-version-check "aws-sam-cli==${SAM_CLI_VERSION}"
+          mkdir -p "$RUNNER_TEMP/sam-bin"
+          ln -s "$RUNNER_TEMP/sam-venv/bin/sam" "$RUNNER_TEMP/sam-bin/sam"
+          echo "$RUNNER_TEMP/sam-bin" >> "$GITHUB_PATH"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.ROLE_ARN }}
+          role-session-name: gha-web-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify target AWS account
+        env:
+          EXPECTED_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          ACTUAL_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$ACTUAL_ACCOUNT" != "$EXPECTED_ACCOUNT" ]; then
+            echo "::error::Credentials point to account $ACTUAL_ACCOUNT, expected $EXPECTED_ACCOUNT"
+            exit 1
+          fi
+
+      # First action against the environment: stops when it is owned by the other tool, by both,
+      # or when the owner cannot be read (fail closed). Read-only: describe-stacks and the
+      # Terraform state objects (counted in memory, never printed or written).
+      - name: Owner guard
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          set +e
+          python scripts/iac_owner_guard.py check --env "$TARGET"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "Owner guard: '$TARGET' is free or already owned by $IAC_TOOL" ;;
+            2) echo "::error::'$TARGET' is owned by the other IaC tool. Destroy it with that tool, then change IAC_TOOL (or set IAC_TOOL to the owner)" ;;
+            3) echo "::error::Both Terraform and CloudFormation own resources in '$TARGET' (inconsistent). Fix by hand before deploying" ;;
+            *) echo "::error::The owner of '$TARGET' could not be determined (exit $rc); nothing was changed" ;;
+          esac
+          exit "$rc"
+
+      # ---- terraform path ----------------------------------------------------------
+      - name: Setup IaC Tooling
+        if: env.IAC_TOOL == 'terraform'
+        uses: ./.github/actions/setup-iac
+        with:
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
+
+      - name: Terragrunt Plan
+        if: env.IAC_TOOL == 'terraform'
+        working-directory: environments/${{ inputs.environment }}
+        env:
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+        run: terragrunt run --all plan
+
+      - name: Terragrunt Apply
+        if: env.IAC_TOOL == 'terraform'
+        working-directory: environments/${{ inputs.environment }}
+        env:
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+        run: terragrunt run --all apply
+
+      # ---- cloudformation path -----------------------------------------------------
+      # Change sets are inspected by a guard before they run; replacements and deletions are refused.
+      - name: CloudFormation deploy
+        id: cfn
+        if: env.IAC_TOOL == 'cloudformation'
+        env:
+          TARGET: ${{ inputs.environment }}
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+        run: |
+          set -o pipefail
+          # Dev only: a stack left in ROLLBACK_COMPLETE by a failed first create is deleted and created again.
+          RECOVER=""
+          if [ "$TARGET" = "dev" ]; then RECOVER="--recover-rollback"; fi
+          python scripts/cfn_deploy.py deploy --env "$TARGET" $RECOVER 2>&1 | tee "$RUNNER_TEMP/cfn-deploy.txt"
+
+      # ---- both paths --------------------------------------------------------------
+      # The backends (sls, ecs) trust this environment's user pool. The owner copies these
+      # two values by hand into the GitHub environment variables of the same name in each
+      # backend repository. A third value, the public app client (no secret), is for
+      # command-line tools and end-to-end tests only (websocket repository); it is never
+      # for the BFF or the backends. All three are identifiers, not secrets.
+      - name: Hand-off values for the backends
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          if [ "$IAC_TOOL" = "terraform" ]; then
+            cd "environments/$TARGET/edge/auth"
+            POOL_ID=$(terragrunt output -raw user_pool_id)
+            CLIENT_ID=$(terragrunt output -raw app_client_id)
+            PUBLIC_CLIENT_ID=$(terragrunt output -raw public_app_client_id)
+          else
+            POOL_ID=$(sed -n 's/^COGNITO_USER_POOL_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+            CLIENT_ID=$(sed -n 's/^COGNITO_APP_CLIENT_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+            PUBLIC_CLIENT_ID=$(sed -n 's/^COGNITO_PUBLIC_APP_CLIENT_ID=//p' "$RUNNER_TEMP/cfn-deploy.txt" | tail -n 1)
+          fi
+          if [ -z "$POOL_ID" ] || [ -z "$CLIENT_ID" ] || [ -z "$PUBLIC_CLIENT_ID" ]; then
+            echo "::error::The Cognito identifiers could not be read from the deployment"
+            exit 1
+          fi
+          {
+            echo "### Cognito hand-off ($TARGET, $IAC_TOOL)"
+            echo
+            echo "Create these variables in the '$TARGET' GitHub environment of each backend repository (sls, ecs):"
+            echo
+            echo '```'
+            echo "COGNITO_USER_POOL_ID=$POOL_ID"
+            echo "COGNITO_APP_CLIENT_ID=$CLIENT_ID"
+            echo '```'
+            echo
+            echo "Public app client (no secret). Only for command-line tools and end-to-end tests (websocket repository). Never for the BFF or the backends:"
+            echo
+            echo '```'
+            echo "COGNITO_PUBLIC_APP_CLIENT_ID=$PUBLIC_CLIENT_ID"
+            echo '```'
+          }>> "$GITHUB_STEP_SUMMARY"
+
+      # The API address is derived from the host of the page (optional override: variable
+      # API_BASE_URL) and the user logs in through the BFF. The environment-specific build inputs
+      # WS_BASE_URL, EVENTS_REALTIME_DOMAIN, EVENTS_HTTP_DOMAIN, and GRAPHQL_URL exist in dev only:
+      # they are passed to the build for dev and the build fails if any of them is set for prod.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build Flutter Web
+        working-directory: src/calculator_app
+        env:
+          # Optional override of the API address; empty keeps the address derived from the host.
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+          # Dev only (real-time mode and live history). Never defined for prod; the values are never printed.
+          WS_BASE_URL: ${{ vars.WS_BASE_URL }}
+          EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
+          EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
+          GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL }}
+          TARGET: ${{ inputs.environment }}
+        run: |
+          if [ "$TARGET" = "prod" ]; then
+            for dev_only in WS_BASE_URL EVENTS_REALTIME_DOMAIN EVENTS_HTTP_DOMAIN GRAPHQL_URL; do
+              if [ -n "${!dev_only}" ]; then
+                echo "::error::${dev_only} must not be defined for prod (real-time and live history are dev only). Remove the variable from the prod environment and from the repository scope."
+                exit 1
+              fi
+            done
+            if [ -n "$AI_API_BASE_URL" ] && echo "$AI_API_BASE_URL" | grep -q "\.dev\."; then
+              echo "::error::AI_API_BASE_URL for prod cannot point to dev domain"
+              exit 1
+            fi
+          fi
+          flutter pub get
+          DEFINES=()
+          if [ -n "$API_BASE_URL" ]; then
+            DEFINES+=("--dart-define=API_BASE_URL=$API_BASE_URL")
+          fi
+          if [ -n "$AI_API_BASE_URL" ]; then
+            DEFINES+=("--dart-define=AI_API_BASE_URL=$AI_API_BASE_URL")
+          fi
+          if [ "$TARGET" = "dev" ]; then
+            if [ -n "$WS_BASE_URL" ]; then
+              DEFINES+=("--dart-define=WS_BASE_URL=$WS_BASE_URL")
+            fi
+            if [ -n "$EVENTS_REALTIME_DOMAIN" ]; then
+              DEFINES+=("--dart-define=EVENTS_REALTIME_DOMAIN=$EVENTS_REALTIME_DOMAIN")
+            fi
+            if [ -n "$EVENTS_HTTP_DOMAIN" ]; then
+              DEFINES+=("--dart-define=EVENTS_HTTP_DOMAIN=$EVENTS_HTTP_DOMAIN")
+            fi
+            if [ -n "$GRAPHQL_URL" ]; then
+              DEFINES+=("--dart-define=GRAPHQL_URL=$GRAPHQL_URL")
+            fi
+          fi
+          flutter build web --release --no-web-resources-cdn "${DEFINES[@]}"
+
+      - name: Publish web page
+        id: publish
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          if [ "$IAC_TOOL" = "terraform" ]; then
+            cd "environments/$TARGET/edge/frontend"
+            BUCKET=$(terragrunt output -raw bucket_name)
+            DISTRIBUTION_ID=$(terragrunt output -raw distribution_id)
+            WEBSITE_URL=$(terragrunt output -raw website_url)
+          else
+            BUCKET=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key BucketName)
+            DISTRIBUTION_ID=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key DistributionId)
+            WEBSITE_URL=$(python scripts/cfn_deploy.py output --env "$TARGET" --unit frontend --key WebsiteUrl)
+          fi
+          aws s3 sync "$GITHUB_WORKSPACE/src/calculator_app/build/web" "s3://$BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+          echo "website_url=$WEBSITE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        env:
+          WEBSITE_URL: ${{ steps.publish.outputs.website_url }}
+        run: |
+          # Retries cover DNS propagation of a just-created domain and the invalidation.
+          curl -fsS --retry 10 --retry-delay 15 --retry-all-errors "$WEBSITE_URL/" | grep -qi "<title>Over-Engineered Calculator</title>"
+          echo "Smoke test passed: $WEBSITE_URL"
+
+      # The BFF answers 401 (no refresh cookie) in JSON. A 200 HTML answer would mean the
+      # request fell through to the app page (custom error responses); a 403 would mean
+      # CloudFront is not allowed to invoke the function URL. For a POST, the signed
+      # request needs the SHA-256 of the body; the body is empty here.
+      - name: Smoke test BFF
+        env:
+          WEBSITE_URL: ${{ steps.publish.outputs.website_url }}
+        run: |
+          EMPTY_SHA256=$(printf '' | sha256sum | cut -d' ' -f1)
+          for attempt in $(seq 1 10); do
+            RESULT=$(curl -sS --retry 10 --retry-delay 15 --retry-all-errors \
+              -o /dev/null -w '%{http_code} %{content_type}' \
+              -X POST "$WEBSITE_URL/auth/refresh" \
+              -H "Content-Type: application/json" \
+              -H "X-Requested-With: XMLHttpRequest" \
+              -H "Origin: $WEBSITE_URL" \
+              -H "x-amz-content-sha256: $EMPTY_SHA256") || RESULT="curl-failed"
+            case "$RESULT" in
+              "401 application/json"*)
+                echo "BFF smoke test passed: $WEBSITE_URL/auth/refresh answered $RESULT"
+                exit 0
+                ;;
+            esac
+            echo "Attempt $attempt: got '$RESULT', expected '401 application/json'; retrying in 15 seconds"
+            sleep 15
+          done
+          echo "::error::POST /auth/refresh did not answer 401 with a JSON body"
+          exit 1

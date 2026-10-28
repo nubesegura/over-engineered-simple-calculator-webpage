@@ -1,0 +1,950 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+import 'ai/ai_assistant_controller.dart';
+import 'ai/ai_assistant_view.dart';
+import 'ai/ai_calculator_client.dart';
+import 'ai/ai_constants.dart';
+import 'api_address.dart';
+import 'api_client.dart';
+import 'auth/auth_api.dart';
+import 'auth/login_page.dart';
+import 'auth/session_controller.dart';
+import 'constants.dart';
+import 'live_history/live_history_config.dart';
+import 'live_history/live_history_constants.dart';
+import 'live_history/live_history_controller.dart';
+import 'live_history/live_history_status_chip.dart';
+import 'realtime/realtime_address.dart';
+import 'realtime/realtime_calculator_client.dart';
+import 'realtime/realtime_channel.dart';
+import 'realtime/realtime_constants.dart';
+import 'realtime/realtime_controller.dart';
+import 'realtime/realtime_mode_selector.dart' show kRealtimeTouchTarget;
+import 'realtime/realtime_status.dart';
+import 'realtime/realtime_status_chip.dart';
+
+void main() {
+  runApp(const CalculatorApp());
+}
+
+class CalculatorApp extends StatefulWidget {
+  /// [httpClient], [session] and [loginSupported] are only injected by tests.
+  const CalculatorApp({
+    super.key,
+    this.httpClient,
+    this.session,
+    this.loginSupported = kIsWeb,
+    this.apiBaseUrl,
+    this.stopwatchFactory,
+    this.realtimeAddress,
+    this.realtimeChannels,
+    this.liveHistoryConfig,
+    this.liveHistoryController,
+    this.aiBaseUrl,
+    this.aiClient,
+    this.aiAssistantController,
+  });
+
+  /// Base URL for the AI natural language service.
+  final String? aiBaseUrl;
+
+  /// Client for the AI calculation service; only injected by tests.
+  final AiCalculatorClient? aiClient;
+
+  /// AI Assistant controller; only injected by tests.
+  final AiAssistantController? aiAssistantController;
+
+  /// Stopwatch factory for the response time; only injected by tests.
+  final Stopwatch Function()? stopwatchFactory;
+
+  /// Real-time address; read from the `WS_BASE_URL` build setting when null.
+  final RealtimeAddress? realtimeAddress;
+
+  /// Opens the real-time connections; only injected by tests.
+  final RealtimeChannelFactory? realtimeChannels;
+
+  /// AppSync Live History configuration; read from build settings when null.
+  final LiveHistoryConfig? liveHistoryConfig;
+
+  /// Live calculation history controller; only injected by tests.
+  final LiveHistoryController? liveHistoryController;
+
+  /// Client for the calculator backends.
+  final http.Client? httpClient;
+
+  /// API address; derived from the page host when null.
+  final String? apiBaseUrl;
+  final SessionController? session;
+
+  /// False outside the web build: there is no same-origin BFF or cookie jar.
+  final bool loginSupported;
+
+  @override
+  State<CalculatorApp> createState() => _CalculatorAppState();
+}
+
+class _CalculatorAppState extends State<CalculatorApp> {
+  late final SessionController _session =
+      widget.session ?? SessionController(HttpAuthApi());
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.loginSupported) unawaited(_session.restore());
+  }
+
+  @override
+  void dispose() {
+    _session.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Over-Engineered Calculator',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
+      ),
+      home: widget.loginSupported
+          ? ListenableBuilder(
+              listenable: _session,
+              builder: (context, _) => _gate(),
+            )
+          : const WebOnlyPage(),
+    );
+  }
+
+  Widget _gate() {
+    switch (_session.state) {
+      case SessionState.restoring:
+        return const Scaffold(
+          body: Center(
+            child: CircularProgressIndicator(key: Key('session-loading')),
+          ),
+        );
+      case SessionState.unauthenticated:
+      case SessionState.expired:
+        return LoginPage(session: _session);
+      case SessionState.authenticated:
+        return CalculatorHomePage(
+          session: _session,
+          httpClient: widget.httpClient,
+          stopwatchFactory: widget.stopwatchFactory ?? Stopwatch.new,
+          apiBaseUrl: widget.apiBaseUrl ?? deriveApiBaseUrl(),
+          realtimeAddress: widget.realtimeAddress,
+          realtimeChannels: widget.realtimeChannels,
+          liveHistoryConfig: widget.liveHistoryConfig,
+          liveHistoryController: widget.liveHistoryController,
+          aiBaseUrl: widget.aiBaseUrl,
+          aiClient: widget.aiClient,
+          aiAssistantController: widget.aiAssistantController,
+        );
+    }
+  }
+}
+
+class CalculatorHomePage extends StatefulWidget {
+  const CalculatorHomePage({
+    super.key,
+    required this.session,
+    required this.apiBaseUrl,
+    this.httpClient,
+    this.stopwatchFactory = Stopwatch.new,
+    this.realtimeAddress,
+    this.realtimeChannels,
+    this.liveHistoryConfig,
+    this.liveHistoryController,
+    this.aiBaseUrl,
+    this.aiClient,
+    this.aiAssistantController,
+  });
+
+  /// Base URL for the AI natural language service.
+  final String? aiBaseUrl;
+
+  /// Client for the AI calculation service; only injected by tests.
+  final AiCalculatorClient? aiClient;
+
+  /// AI Assistant controller; only injected by tests.
+  final AiAssistantController? aiAssistantController;
+
+  /// Real-time address; read from the build setting when null.
+  final RealtimeAddress? realtimeAddress;
+  final RealtimeChannelFactory? realtimeChannels;
+
+  /// AppSync Live History configuration; read from build settings when null.
+  final LiveHistoryConfig? liveHistoryConfig;
+
+  /// Live calculation history controller; only injected by tests.
+  final LiveHistoryController? liveHistoryController;
+
+  /// Creates the monotonic stopwatch of one calculation; tests inject a fake.
+  final Stopwatch Function() stopwatchFactory;
+  final SessionController session;
+  final http.Client? httpClient;
+
+  /// Read-only API address; empty when the page host has none.
+  final String apiBaseUrl;
+
+  @override
+  State<CalculatorHomePage> createState() => _CalculatorHomePageState();
+}
+
+class _CalculatorHomePageState extends State<CalculatorHomePage>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  late final TabController _tabController;
+  final TextEditingController _controllerA = TextEditingController();
+  final TextEditingController _controllerB = TextEditingController();
+  String _result = '0';
+  String? _backend;
+  bool _showTransport = false;
+  int? _responseMs;
+
+  /// The real-time connection; lives as long as the signed-in page, so logout
+  /// and session expiry (which replace the page) close it.
+  late final RealtimeController _realtime;
+
+  /// Live calculation history controller when AppSync Live History is configured.
+  LiveHistoryController? _liveHistory;
+  bool _ownsLiveHistory = false;
+
+  /// AI Assistant controller for the Natural Language tab.
+  late final AiAssistantController _aiController;
+  bool _ownsAiController = false;
+
+  /// True while the shown outcome is "not connected": offers the REST action.
+  bool _offerRestFallback = false;
+
+  /// Bumped whenever the shown outcome is reset, to drop late time updates.
+  int _generation = 0;
+  bool _isLoading = false;
+  String _selectedOperation = ApiConstants.defaultOperation;
+
+  final List<HistoryItem> _history = [];
+  String? _historyCursor;
+  bool _historyLoading = false;
+  bool _historyLoaded = false;
+  String? _historyError;
+  Timer? _historyRefreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this)
+      ..addListener(_onTabChanged);
+    _realtime = RealtimeController(
+      tokens: widget.session,
+      address: widget.realtimeAddress ?? RealtimeAddress.fromEnvironment(),
+      channels: widget.realtimeChannels,
+    )..addListener(_onRealtimeChanged);
+    final injectedLiveHistory = widget.liveHistoryController;
+    final liveConfig =
+        widget.liveHistoryConfig ?? LiveHistoryConfig.fromEnvironment();
+    if (injectedLiveHistory != null) {
+      _liveHistory = injectedLiveHistory..addListener(_onLiveHistoryChanged);
+      _ownsLiveHistory = false;
+    } else if (liveConfig.isConfigured) {
+      _liveHistory = LiveHistoryController(
+        config: liveConfig,
+        tokens: widget.session,
+        channels: widget.realtimeChannels,
+        httpClient: widget.httpClient,
+      )..addListener(_onLiveHistoryChanged);
+      _ownsLiveHistory = true;
+    }
+    final injectedAiController = widget.aiAssistantController;
+    if (injectedAiController != null) {
+      _aiController = injectedAiController;
+      _ownsAiController = false;
+    } else {
+      final client = widget.aiClient ??
+          AiCalculatorClient(
+            baseUrl: widget.aiBaseUrl ?? AiConstants.effectiveBaseUrl(),
+            tokenSource: widget.session,
+            httpClient: widget.httpClient,
+          );
+      _aiController = AiAssistantController(
+        client: client,
+        stopwatchFactory: widget.stopwatchFactory,
+      );
+      _ownsAiController = true;
+    }
+    widget.session.addListener(_onSessionChanged);
+    if (_liveHistory != null) {
+      unawaited(_liveHistory!.start());
+    }
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _onTabChanged() {
+    if (_tabController.indexIsChanging) return;
+    _resetOutcome();
+    if (_tabController.index == 1) {
+      unawaited(_realtime.activate());
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onRealtimeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onLiveHistoryChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onSessionChanged() {
+    if (widget.session.state != SessionState.authenticated) {
+      _liveHistory?.resetForLogout();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _realtime.setTabVisible(state == AppLifecycleState.resumed);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.session.removeListener(_onSessionChanged);
+    _tabController
+      ..removeListener(_onTabChanged)
+      ..dispose();
+    final liveHistory = _liveHistory;
+    if (liveHistory != null) {
+      liveHistory.removeListener(_onLiveHistoryChanged);
+      if (_ownsLiveHistory) {
+        liveHistory.dispose();
+      } else {
+        liveHistory.resetForLogout();
+      }
+    }
+    _realtime
+      ..removeListener(_onRealtimeChanged)
+      ..dispose();
+    if (_ownsAiController) {
+      _aiController.dispose();
+    }
+    _historyRefreshTimer?.cancel();
+    _controllerA.dispose();
+    _controllerB.dispose();
+    super.dispose();
+  }
+
+  CalculatorApiClient _client() => CalculatorApiClient(
+        baseUrl: widget.apiBaseUrl,
+        tokens: widget.session,
+        httpClient: widget.httpClient,
+      );
+
+  /// Why requests cannot be sent, or null when the address is usable.
+  String? _addressProblem(CalculatorApiClient client) {
+    if (widget.apiBaseUrl.isEmpty) return ApiConstants.noApiAddressMessage;
+    if (!client.hasValidBaseUrl) return ApiConstants.invalidApiAddressMessage;
+    if (!client.hasTrustedBaseUrl) return untrustedUrlMessage;
+    return null;
+  }
+
+  Future<void> _calculateRealtime() async {
+    setState(() {
+      _resetOutcome();
+      _isLoading = true;
+      _result = 'Calculating...';
+    });
+    final generation = _generation;
+    final stopwatch = widget.stopwatchFactory()..start();
+    final outcome = await _realtime.calculate(
+      operation: _selectedOperation,
+      a: _controllerA.text,
+      b: _controllerB.text,
+    );
+    if (!mounted) return;
+    if (outcome is CalculationCancelled || generation != _generation) {
+      setState(() => _isLoading = false);
+      return;
+    }
+    setState(() {
+      _isLoading = false;
+      switch (outcome) {
+        case CalculationSuccess(:final result):
+          _result = result;
+          _showTransport = true;
+        case CalculationFailure(:final message, :final kind):
+          _result = message;
+          _offerRestFallback = kind == FailureKind.notConnected;
+        case CalculationCancelled():
+          break;
+      }
+    });
+    if (outcome is CalculationSuccess) _stopAfterFrame(stopwatch);
+  }
+
+  /// One calculation through REST, whatever the selected mode is.
+  Future<void> _calculateRest() async {
+    final client = _client();
+    final problem = _addressProblem(client);
+    if (problem != null) {
+      setState(() => _result = problem);
+      return;
+    }
+    final a = double.tryParse(_controllerA.text);
+    final b = double.tryParse(_controllerB.text);
+    if (a == null || b == null) {
+      setState(() => _result = 'Enter valid numbers.');
+      return;
+    }
+
+    setState(() {
+      _resetOutcome();
+      _isLoading = true;
+      _result = 'Calculating...';
+    });
+
+    final stopwatch = widget.stopwatchFactory()..start();
+    try {
+      final answer = await client.calculate(_selectedOperation, a, b);
+      if (!mounted) return;
+      setState(() {
+        _result = answer.result;
+        _backend = answer.backend;
+      });
+      _stopAfterFrame(stopwatch);
+      _scheduleHistoryRefresh();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _result = 'Error: ${e.message}');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// Stops [stopwatch] once the frame that shows the result has been drawn and
+  /// shows the elapsed milliseconds (unless a newer action reset the page).
+  void _stopAfterFrame(Stopwatch stopwatch) {
+    final generation = _generation;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      stopwatch.stop();
+      if (!mounted || generation != _generation) return;
+      setState(() => _responseMs = stopwatch.elapsedMilliseconds);
+    });
+  }
+
+  /// Back to the initial result; the backend and the time are hidden.
+  void _resetOutcome() {
+    _generation++;
+    _result = '0';
+    _backend = null;
+    _showTransport = false;
+    _offerRestFallback = false;
+    _responseMs = null;
+  }
+
+  /// The inputs changed: forget the outcome and any real-time request.
+  void _onInputChanged() {
+    if (_realtimeMode) _realtime.discardPending();
+    setState(_resetOutcome);
+  }
+
+  bool get _realtimeMode => _tabController.index == 1;
+
+  Widget _buildRealtimeStatus() {
+    final status = _realtime.status;
+    final canReconnect = status.kind == RealtimeStatusKind.disconnected ||
+        status.kind == RealtimeStatusKind.notAuthorized;
+    return Column(
+      children: [
+        const SizedBox(height: 12),
+        RealtimeStatusChip(
+          key: const Key('realtime-status-chip'),
+          status: status,
+        ),
+        if (status.detail != null) ...[
+          const SizedBox(height: 8),
+          Text(status.detail!, key: const Key('realtime-status-detail')),
+        ],
+        if (canReconnect)
+          TextButton(
+            key: const Key('realtime-reconnect'),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, kRealtimeTouchTarget),
+            ),
+            onPressed: () => unawaited(_realtime.reconnect()),
+            child: const Text(RealtimeConstants.reconnectLabel),
+          ),
+      ],
+    );
+  }
+
+  /// The history is eventually consistent: wait a moment before reloading it. Only
+  /// done when the user already opened the history, to avoid extra API calls.
+  void _scheduleHistoryRefresh() {
+    if (_liveHistory != null || !_historyLoaded) return;
+    _historyRefreshTimer?.cancel();
+    _historyRefreshTimer = Timer(ApiConstants.historyRefreshDelay, () {
+      if (mounted) _loadHistory();
+    });
+  }
+
+  /// Loads the first page (replacing the list) or, with [more], the next one.
+  Future<void> _loadHistory({bool more = false}) async {
+    final client = _client();
+    final problem = _addressProblem(client);
+    if (problem != null) {
+      setState(() => _historyError = problem);
+      return;
+    }
+    setState(() {
+      _historyLoading = true;
+      _historyError = null;
+    });
+    try {
+      final page =
+          await client.fetchHistory(cursor: more ? _historyCursor : null);
+      if (!mounted) return;
+      setState(() {
+        if (!more) _history.clear();
+        _history.addAll(page.items);
+        _historyCursor = page.nextCursor;
+        _historyLoaded = true;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _historyError = e.statusCode == 404
+            ? 'This service does not provide a history.'
+            : e.message;
+      });
+    } finally {
+      if (mounted) setState(() => _historyLoading = false);
+    }
+  }
+
+  Widget _buildOpButton(String op, String symbol) {
+    final isSelected = _selectedOperation == op;
+    final label = Text(
+      symbol,
+      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+    );
+    void select() => setState(() {
+          _selectedOperation = op;
+          _resetOutcome();
+        });
+    return isSelected
+        ? FilledButton(onPressed: select, child: label)
+        : OutlinedButton(onPressed: select, child: label);
+  }
+
+  static String _two(int n) => n.toString().padLeft(2, '0');
+
+  static String _formatTime(DateTime? time) {
+    if (time == null) return '';
+    final t = time.toLocal();
+    return '${t.year}-${_two(t.month)}-${_two(t.day)} '
+        '${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)}';
+  }
+
+  Widget _buildLiveHistory(
+    BuildContext context,
+    LiveHistoryController liveController,
+  ) {
+    final errorStyle = TextStyle(color: Theme.of(context).colorScheme.error);
+    final Widget body;
+    if (liveController.items.isEmpty) {
+      body = liveController.errorMessage != null
+          ? Text(liveController.errorMessage!, style: errorStyle)
+          : const Text(LiveHistoryConstants.emptyHistoryMessage);
+    } else {
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (liveController.errorMessage != null)
+            Text(liveController.errorMessage!, style: errorStyle),
+          for (final item in liveController.items)
+            ListTile(
+              key: Key('history-${item.txId}'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                '${item.a} ${item.symbol} ${item.b} = ${item.displayOutcome}',
+                style: const TextStyle(fontSize: 18),
+              ),
+              subtitle:
+                  Text('${_formatTime(item.occurredAt)} · ${item.transport}'),
+            ),
+          if (liveController.hasMore)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                key: const Key('history-load-more'),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(64, kRealtimeTouchTarget),
+                ),
+                onPressed: liveController.isLoading
+                    ? null
+                    : () => unawaited(liveController.loadMore()),
+                child: const Text(LiveHistoryConstants.loadMoreLabel),
+              ),
+            ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  Text(
+                    LiveHistoryConstants.historyTitle,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  LiveHistoryStatusChip(status: liveController.status),
+                ],
+              ),
+            ),
+            if (liveController.isLoading)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            IconButton(
+              key: const Key('history-refresh'),
+              style: IconButton.styleFrom(
+                minimumSize:
+                    const Size(kRealtimeTouchTarget, kRealtimeTouchTarget),
+              ),
+              tooltip: LiveHistoryConstants.refreshTooltip,
+              icon: const Icon(Icons.refresh),
+              onPressed: liveController.isLoading
+                  ? null
+                  : () => unawaited(liveController.refresh()),
+            ),
+          ],
+        ),
+        body,
+      ],
+    );
+  }
+
+  Widget _buildClassicHistory(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final Widget body;
+    if (_historyError != null) {
+      body = Text(_historyError!,
+          style: TextStyle(color: Theme.of(context).colorScheme.error));
+    } else if (!_historyLoaded) {
+      body = Text(
+        _historyLoading
+            ? 'Loading...'
+            : 'Press refresh to load your calculations.',
+      );
+    } else if (_history.isEmpty) {
+      body = const Text('No calculations yet.');
+    } else {
+      body = Column(
+        children: [
+          for (final item in _history)
+            ListTile(
+              key: Key('history-${item.id}'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                '${item.a} ${ApiConstants.operations[item.operation] ?? item.operation} '
+                '${item.b} = ${item.result}',
+                style: const TextStyle(fontSize: 18),
+              ),
+              subtitle: Text(_formatTime(item.occurredAt)),
+            ),
+          if (_historyCursor != null)
+            TextButton(
+              onPressed:
+                  _historyLoading ? null : () => _loadHistory(more: true),
+              child: const Text('Load more'),
+            ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text('History', style: textTheme.titleLarge)),
+            if (_historyLoading)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            IconButton(
+              key: const Key('history-refresh'),
+              tooltip: 'Refresh history',
+              icon: const Icon(Icons.refresh),
+              onPressed: _historyLoading ? null : () => _loadHistory(),
+            ),
+          ],
+        ),
+        body,
+      ],
+    );
+  }
+
+  Widget _buildLiveHistoryUnavailable(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                LiveHistoryConstants.historyTitle,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(LiveHistoryConstants.emptyHistoryMessage),
+      ],
+    );
+  }
+
+  Widget _buildRestTab(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              InputDecorator(
+                decoration: const InputDecoration(labelText: 'Service URL'),
+                child: SelectableText(
+                  widget.apiBaseUrl.isEmpty
+                      ? ApiConstants.noApiAddressMessage
+                      : widget.apiBaseUrl,
+                  key: const Key('service-url-label'),
+                ),
+              ),
+              const SizedBox(height: 24),
+              TextField(
+                key: const Key('first-number-field'),
+                controller: _controllerA,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'First Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('second-number-field'),
+                controller: _controllerB,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'Second Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final entry in ApiConstants.operations.entries)
+                    _buildOpButton(entry.key, entry.value),
+                ],
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: _isLoading ? null : _calculateRest,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(50),
+                ),
+                child: const Text('Calculate', style: TextStyle(fontSize: 22)),
+              ),
+              const SizedBox(height: 32),
+              Text(
+                'Result: $_result',
+                style:
+                    const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              if (_backend != null) Text('Backend: $_backend'),
+              if (_responseMs != null) Text('Response time: $_responseMs ms'),
+              const SizedBox(height: 24),
+              const Divider(),
+              _buildClassicHistory(context),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWebSocketTab(BuildContext context) {
+    final liveController = _liveHistory;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildRealtimeStatus(),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('first-number-field'),
+                controller: _controllerA,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'First Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('second-number-field'),
+                controller: _controllerB,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'Second Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final entry in ApiConstants.operations.entries)
+                    _buildOpButton(entry.key, entry.value),
+                ],
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: _isLoading ? null : _calculateRealtime,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(50),
+                ),
+                child: const Text('Calculate', style: TextStyle(fontSize: 22)),
+              ),
+              if (_isLoading) ...[
+                const SizedBox(height: 16),
+                const LinearProgressIndicator(
+                  key: Key('realtime-progress'),
+                  semanticsLabel: RealtimeConstants.progressLabel,
+                ),
+              ],
+              const SizedBox(height: 32),
+              Text(
+                'Result: $_result',
+                style:
+                    const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              if (_offerRestFallback)
+                TextButton(
+                  key: const Key('use-rest-fallback'),
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(0, kRealtimeTouchTarget),
+                  ),
+                  onPressed: _isLoading ? null : _calculateRest,
+                  child: const Text(RealtimeConstants.useRestLabel),
+                ),
+              if (_backend != null) Text('Backend: $_backend'),
+              if (_showTransport) const Text(RealtimeConstants.transportLine),
+              if (_responseMs != null) Text('Response time: $_responseMs ms'),
+              const SizedBox(height: 24),
+              const Divider(),
+              if (liveController != null)
+                _buildLiveHistory(context, liveController)
+              else
+                _buildLiveHistoryUnavailable(context),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAiTab(BuildContext context) {
+    return AiAssistantView(
+      key: const Key('ai-assistant-tab-placeholder'),
+      controller: _aiController,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Over-Engineered Calculator',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+        actions: [
+          IconButton(
+            key: const Key('logout-button'),
+            tooltip: 'Log out',
+            icon: const Icon(Icons.logout),
+            onPressed: widget.session.logout,
+          ),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: Theme.of(context).colorScheme.onPrimary,
+          labelColor: Theme.of(context).colorScheme.onPrimary,
+          unselectedLabelColor:
+              Theme.of(context).colorScheme.onPrimary.withValues(alpha: 0.7),
+          tabs: const [
+            Tab(
+              key: Key('tab-rest'),
+              icon: Icon(Icons.calculate),
+              text: 'REST API',
+            ),
+            Tab(
+              key: Key('tab-websocket'),
+              icon: Icon(Icons.sync_alt),
+              text: 'WebSocket',
+            ),
+            Tab(
+              key: Key('tab-ai'),
+              icon: Icon(Icons.auto_awesome),
+              text: 'AI Assistant',
+            ),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildRestTab(context),
+          _buildWebSocketTab(context),
+          _buildAiTab(context),
+        ],
+      ),
+    );
+  }
+}

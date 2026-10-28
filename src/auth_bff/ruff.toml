@@ -1,0 +1,16 @@
+line-length = 100
+target-version = "py313"
+extend-exclude = [".venv"]
+
+[lint]
+select = ["E", "F", "W", "I", "N", "B", "S", "UP", "SIM"]
+
+[lint.per-file-ignores]
+"**/tests/**" = [
+    "S101",  # pytest uses plain asserts
+    "S105",  # fake tokens and passwords in fixtures
+    "S106",  # fake tokens and passwords in fixtures
+]
+
+[lint.isort]
+known-first-party = ["auth_bff", "handler", "tests"]

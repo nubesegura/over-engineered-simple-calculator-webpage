@@ -1,0 +1,37 @@
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "S", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.py" = [
+    "S603",  # the AWS and SAM CLIs are called with fixed argument lists, never through a shell
+    "S607",  # the CLIs are resolved from PATH on the runner
+]
+"tests/**" = [
+    "S101",  # pytest uses plain asserts
+    "S105",  # fake tokens in fixtures
+    "S106",
+    "N803",  # fake clients mirror the boto3 keyword names (StackName, Bucket, ...)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "iac_common", "cfn_deploy", "iac_owner_guard", "iac_inventory", "post_destroy_check",
+    "e2e_env", "e2e_log", "e2e_redact", "create_test_user", "collect_logs", "web_driver", "recorder",
+]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+mypy_path = ".:e2e"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "e2e"]
+testpaths = ["tests"]
+addopts = "--cov=scripts --cov-config=scripts/pyproject.toml --cov-report=term-missing:skip-covered --cov-fail-under=85"
+
+[tool.coverage.run]
+omit = ["*/tests/*", "*/e2e/recorder.py"]  # recorder drives ffmpeg and the desktop: run by hand

@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Certificate stack, us-east-1 only (twin of the us-east-1 part of the Terraform unit edge/frontend,
+  files modules/frontend/domain.tf and monitoring.tf): the CloudFront ACM certificate validated by DNS in
+  the existing Route 53 zone (CloudFormation writes the validation CNAME itself), the web alert SNS topic
+  with its policy and email subscription, and the two certificate expiry alarms (30 and 7 days, ACM-03). CloudFront
+  accepts only us-east-1 certificates and ACM publishes DaysToExpiry only there.
+
+Parameters:
+  EnvType:
+    Type: String
+    AllowedValues: [dev, prod]
+    Description: Environment tier; last segment of every resource name
+  Context:
+    Type: String
+    Default: oecalc
+    AllowedPattern: "^[a-z0-9]+$"
+    Description: Functional context of the project (naming convention segment)
+  RegionCode:
+    Type: String
+    AllowedPattern: "^[a-z]+[0-9]+$"
+    Description: >-
+      Region code of the environment (useast2). Terraform builds the certificate Name tag with the region of
+      the default provider, so the tag keeps that segment although the certificate lives in us-east-1.
+  DomainName:
+    Type: String
+    AllowedPattern: "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    Description: Public domain name of the web page (CloudFront alias)
+  HostedZoneId:
+    Type: String
+    AllowedPattern: "^Z[A-Z0-9]{1,31}$"
+    Description: >-
+      Route 53 public hosted zone of this account that contains DomainName (GitHub variable ROUTE53_ZONE_ID,
+      passed by the deploy script). Format Z..., without the /hostedzone/ prefix.
+  AlertEmail:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "^[^@ ]+@[^@ ]+$"
+    Description: Email subscribed to the certificate expiry alerts (GitHub secret SUPPORT_EMAIL)
+
+Rules:
+  CertificateRegion:
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::Region", us-east-1]
+        AssertDescription: This stack must be deployed in us-east-1 (CloudFront certificates and the ACM metric)
+
+Resources:
+  # DNS validation with HostedZoneId: CloudFormation adds the validation CNAME to the zone and waits for
+  # ISSUED (replaces aws_route53_record.validation and aws_acm_certificate_validation). Automatic renewal
+  # (ACM-01). DomainName, KeyAlgorithm, ValidationMethod and DomainValidationOptions are create-only.
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      KeyAlgorithm: RSA_2048
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub "acm-${RegionCode}-${Context}-web-${EnvType}"
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_26
+            comment: Accepted gap G8 (no customer managed key for SNS, owner decision 2026-10-04), same as Terraform
+    Properties:
+      TopicName: !Sub "sns-useast1-${Context}-web-alerts-${EnvType}"
+
+  AlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Endpoint is create-only: a new SUPPORT_EMAIL replaces the subscription (refused by the change-set guard).
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # Two alarms, as ACM-03 asks (Terraform for_each over certificate_expiry_alert_days = 30, 7).
+  CertificateExpiry30dAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "alrm-useast1-${Context}-web-cert-expiry-30d-${EnvType}"
+      AlarmDescription: !Sub "Certificate of ${DomainName} expires in less than 30 days. DNS-validated certificates renew by themselves: check the validation CNAME if this does not clear."
+      Namespace: AWS/CertificateManager
+      MetricName: DaysToExpiry
+      Dimensions:
+        - Name: CertificateArn
+          Value: !Ref Certificate
+      Statistic: Minimum
+      Period: 86400
+      EvaluationPeriods: 1
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 30
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  CertificateExpiry7dAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "alrm-useast1-${Context}-web-cert-expiry-7d-${EnvType}"
+      AlarmDescription: !Sub "Certificate of ${DomainName} expires in less than 7 days. DNS-validated certificates renew by themselves: check the validation CNAME if this does not clear."
+      Namespace: AWS/CertificateManager
+      MetricName: DaysToExpiry
+      Dimensions:
+        - Name: CertificateArn
+          Value: !Ref Certificate
+      Statistic: Minimum
+      Period: 86400
+      EvaluationPeriods: 1
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 7
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+Outputs:
+  CertificateArn:
+    Description: ARN of the CloudFront certificate (us-east-1); passed to the frontend stack by the deploy script
+    Value: !Ref Certificate
+  AlertsTopicArn:
+    Description: ARN of the web alert topic (us-east-1)
+    Value: !Ref AlertsTopic
