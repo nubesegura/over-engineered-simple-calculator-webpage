@@ -261,6 +261,9 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
+      await tester.tap(find.text('WebSocket'));
+      await tester.pumpAndSettle();
+
       final refreshButton = find.byKey(const Key('history-refresh'));
       final loadMoreButton = find.byKey(const Key('history-load-more'));
 

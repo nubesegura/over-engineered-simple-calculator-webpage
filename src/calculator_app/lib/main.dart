@@ -4,6 +4,10 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import 'ai/ai_assistant_controller.dart';
+import 'ai/ai_assistant_view.dart';
+import 'ai/ai_calculator_client.dart';
+import 'ai/ai_constants.dart';
 import 'api_address.dart';
 import 'api_client.dart';
 import 'auth/auth_api.dart';
@@ -19,7 +23,7 @@ import 'realtime/realtime_calculator_client.dart';
 import 'realtime/realtime_channel.dart';
 import 'realtime/realtime_constants.dart';
 import 'realtime/realtime_controller.dart';
-import 'realtime/realtime_mode_selector.dart';
+import 'realtime/realtime_mode_selector.dart' show kRealtimeTouchTarget;
 import 'realtime/realtime_status.dart';
 import 'realtime/realtime_status_chip.dart';
 
@@ -40,7 +44,19 @@ class CalculatorApp extends StatefulWidget {
     this.realtimeChannels,
     this.liveHistoryConfig,
     this.liveHistoryController,
+    this.aiBaseUrl,
+    this.aiClient,
+    this.aiAssistantController,
   });
+
+  /// Base URL for the AI natural language service.
+  final String? aiBaseUrl;
+
+  /// Client for the AI calculation service; only injected by tests.
+  final AiCalculatorClient? aiClient;
+
+  /// AI Assistant controller; only injected by tests.
+  final AiAssistantController? aiAssistantController;
 
   /// Stopwatch factory for the response time; only injected by tests.
   final Stopwatch Function()? stopwatchFactory;
@@ -125,6 +141,9 @@ class _CalculatorAppState extends State<CalculatorApp> {
           realtimeChannels: widget.realtimeChannels,
           liveHistoryConfig: widget.liveHistoryConfig,
           liveHistoryController: widget.liveHistoryController,
+          aiBaseUrl: widget.aiBaseUrl,
+          aiClient: widget.aiClient,
+          aiAssistantController: widget.aiAssistantController,
         );
     }
   }
@@ -141,7 +160,19 @@ class CalculatorHomePage extends StatefulWidget {
     this.realtimeChannels,
     this.liveHistoryConfig,
     this.liveHistoryController,
+    this.aiBaseUrl,
+    this.aiClient,
+    this.aiAssistantController,
   });
+
+  /// Base URL for the AI natural language service.
+  final String? aiBaseUrl;
+
+  /// Client for the AI calculation service; only injected by tests.
+  final AiCalculatorClient? aiClient;
+
+  /// AI Assistant controller; only injected by tests.
+  final AiAssistantController? aiAssistantController;
 
   /// Real-time address; read from the build setting when null.
   final RealtimeAddress? realtimeAddress;
@@ -166,7 +197,8 @@ class CalculatorHomePage extends StatefulWidget {
 }
 
 class _CalculatorHomePageState extends State<CalculatorHomePage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  late final TabController _tabController;
   final TextEditingController _controllerA = TextEditingController();
   final TextEditingController _controllerB = TextEditingController();
   String _result = '0';
@@ -177,11 +209,14 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   /// The real-time connection; lives as long as the signed-in page, so logout
   /// and session expiry (which replace the page) close it.
   late final RealtimeController _realtime;
-  bool _realtimeMode = false;
 
   /// Live calculation history controller when AppSync Live History is configured.
   LiveHistoryController? _liveHistory;
   bool _ownsLiveHistory = false;
+
+  /// AI Assistant controller for the Natural Language tab.
+  late final AiAssistantController _aiController;
+  bool _ownsAiController = false;
 
   /// True while the shown outcome is "not connected": offers the REST action.
   bool _offerRestFallback = false;
@@ -201,6 +236,8 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 3, vsync: this)
+      ..addListener(_onTabChanged);
     _realtime = RealtimeController(
       tokens: widget.session,
       address: widget.realtimeAddress ?? RealtimeAddress.fromEnvironment(),
@@ -221,11 +258,37 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
       )..addListener(_onLiveHistoryChanged);
       _ownsLiveHistory = true;
     }
+    final injectedAiController = widget.aiAssistantController;
+    if (injectedAiController != null) {
+      _aiController = injectedAiController;
+      _ownsAiController = false;
+    } else {
+      final client = widget.aiClient ??
+          AiCalculatorClient(
+            baseUrl: widget.aiBaseUrl ?? AiConstants.effectiveBaseUrl(),
+            tokenSource: widget.session,
+            httpClient: widget.httpClient,
+          );
+      _aiController = AiAssistantController(
+        client: client,
+        stopwatchFactory: widget.stopwatchFactory,
+      );
+      _ownsAiController = true;
+    }
     widget.session.addListener(_onSessionChanged);
     if (_liveHistory != null) {
       unawaited(_liveHistory!.start());
     }
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _onTabChanged() {
+    if (_tabController.indexIsChanging) return;
+    _resetOutcome();
+    if (_tabController.index == 1) {
+      unawaited(_realtime.activate());
+    }
+    if (mounted) setState(() {});
   }
 
   void _onRealtimeChanged() {
@@ -251,6 +314,9 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.session.removeListener(_onSessionChanged);
+    _tabController
+      ..removeListener(_onTabChanged)
+      ..dispose();
     final liveHistory = _liveHistory;
     if (liveHistory != null) {
       liveHistory.removeListener(_onLiveHistoryChanged);
@@ -263,6 +329,9 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     _realtime
       ..removeListener(_onRealtimeChanged)
       ..dispose();
+    if (_ownsAiController) {
+      _aiController.dispose();
+    }
     _historyRefreshTimer?.cancel();
     _controllerA.dispose();
     _controllerB.dispose();
@@ -281,12 +350,6 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     if (!client.hasValidBaseUrl) return ApiConstants.invalidApiAddressMessage;
     if (!client.hasTrustedBaseUrl) return untrustedUrlMessage;
     return null;
-  }
-
-  Future<void> _calculate() async {
-    if (_controllerA.text.isEmpty || _controllerB.text.isEmpty) return;
-    if (_realtimeMode) return _calculateRealtime();
-    return _calculateRest();
   }
 
   Future<void> _calculateRealtime() async {
@@ -389,18 +452,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     setState(_resetOutcome);
   }
 
-  void _selectMode(bool realtime) {
-    if (realtime == _realtimeMode) return;
-    setState(() {
-      _realtimeMode = realtime;
-      _resetOutcome();
-    });
-    if (realtime) {
-      unawaited(_realtime.activate());
-    } else {
-      _realtime.deactivate();
-    }
-  }
+  bool get _realtimeMode => _tabController.index == 1;
 
   Widget _buildRealtimeStatus() {
     final status = _realtime.status;
@@ -409,7 +461,10 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     return Column(
       children: [
         const SizedBox(height: 12),
-        RealtimeStatusChip(status: status),
+        RealtimeStatusChip(
+          key: const Key('realtime-status-chip'),
+          status: status,
+        ),
         if (status.detail != null) ...[
           const SizedBox(height: 8),
           Text(status.detail!, key: const Key('realtime-status-detail')),
@@ -585,11 +640,7 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     );
   }
 
-  Widget _buildHistory(BuildContext context) {
-    final liveController = _liveHistory;
-    if (liveController != null) {
-      return _buildLiveHistory(context, liveController);
-    }
+  Widget _buildClassicHistory(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final Widget body;
     if (_historyError != null) {
@@ -653,6 +704,198 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
     );
   }
 
+  Widget _buildLiveHistoryUnavailable(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                LiveHistoryConstants.historyTitle,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(LiveHistoryConstants.emptyHistoryMessage),
+      ],
+    );
+  }
+
+  Widget _buildRestTab(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              InputDecorator(
+                decoration: const InputDecoration(labelText: 'Service URL'),
+                child: SelectableText(
+                  widget.apiBaseUrl.isEmpty
+                      ? ApiConstants.noApiAddressMessage
+                      : widget.apiBaseUrl,
+                  key: const Key('service-url-label'),
+                ),
+              ),
+              const SizedBox(height: 24),
+              TextField(
+                key: const Key('first-number-field'),
+                controller: _controllerA,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'First Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('second-number-field'),
+                controller: _controllerB,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'Second Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final entry in ApiConstants.operations.entries)
+                    _buildOpButton(entry.key, entry.value),
+                ],
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: _isLoading ? null : _calculateRest,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(50),
+                ),
+                child: const Text('Calculate', style: TextStyle(fontSize: 22)),
+              ),
+              const SizedBox(height: 32),
+              Text(
+                'Result: $_result',
+                style:
+                    const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              if (_backend != null) Text('Backend: $_backend'),
+              if (_responseMs != null) Text('Response time: $_responseMs ms'),
+              const SizedBox(height: 24),
+              const Divider(),
+              _buildClassicHistory(context),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWebSocketTab(BuildContext context) {
+    final liveController = _liveHistory;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildRealtimeStatus(),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('first-number-field'),
+                controller: _controllerA,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'First Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                key: const Key('second-number-field'),
+                controller: _controllerB,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 22),
+                decoration: const InputDecoration(
+                  labelText: 'Second Number',
+                  labelStyle: TextStyle(fontSize: 22),
+                ),
+                onChanged: (_) => _onInputChanged(),
+              ),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final entry in ApiConstants.operations.entries)
+                    _buildOpButton(entry.key, entry.value),
+                ],
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: _isLoading ? null : _calculateRealtime,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(50),
+                ),
+                child: const Text('Calculate', style: TextStyle(fontSize: 22)),
+              ),
+              if (_isLoading) ...[
+                const SizedBox(height: 16),
+                const LinearProgressIndicator(
+                  key: Key('realtime-progress'),
+                  semanticsLabel: RealtimeConstants.progressLabel,
+                ),
+              ],
+              const SizedBox(height: 32),
+              Text(
+                'Result: $_result',
+                style:
+                    const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              if (_offerRestFallback)
+                TextButton(
+                  key: const Key('use-rest-fallback'),
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(0, kRealtimeTouchTarget),
+                  ),
+                  onPressed: _isLoading ? null : _calculateRest,
+                  child: const Text(RealtimeConstants.useRestLabel),
+                ),
+              if (_backend != null) Text('Backend: $_backend'),
+              if (_showTransport) const Text(RealtimeConstants.transportLine),
+              if (_responseMs != null) Text('Response time: $_responseMs ms'),
+              const SizedBox(height: 24),
+              const Divider(),
+              if (liveController != null)
+                _buildLiveHistory(context, liveController)
+              else
+                _buildLiveHistoryUnavailable(context),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAiTab(BuildContext context) {
+    return AiAssistantView(
+      key: const Key('ai-assistant-tab-placeholder'),
+      controller: _aiController,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -669,103 +912,38 @@ class _CalculatorHomePageState extends State<CalculatorHomePage>
             onPressed: widget.session.logout,
           ),
         ],
-      ),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16.0),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 400),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                InputDecorator(
-                  decoration: const InputDecoration(labelText: 'Service URL'),
-                  child: SelectableText(
-                    widget.apiBaseUrl.isEmpty
-                        ? ApiConstants.noApiAddressMessage
-                        : widget.apiBaseUrl,
-                    key: const Key('service-url-label'),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                RealtimeModeSelector(
-                  realtime: _realtimeMode,
-                  onChanged: _selectMode,
-                ),
-                if (_realtimeMode) _buildRealtimeStatus(),
-                const SizedBox(height: 32),
-                TextField(
-                  key: const Key('first-number-field'),
-                  controller: _controllerA,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(fontSize: 22),
-                  decoration: const InputDecoration(
-                    labelText: 'First Number',
-                    labelStyle: TextStyle(fontSize: 22),
-                  ),
-                  onChanged: (_) => _onInputChanged(),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  key: const Key('second-number-field'),
-                  controller: _controllerB,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(fontSize: 22),
-                  decoration: const InputDecoration(
-                    labelText: 'Second Number',
-                    labelStyle: TextStyle(fontSize: 22),
-                  ),
-                  onChanged: (_) => _onInputChanged(),
-                ),
-                const SizedBox(height: 32),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final entry in ApiConstants.operations.entries)
-                      _buildOpButton(entry.key, entry.value),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: _isLoading ? null : _calculate,
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(50),
-                  ),
-                  child:
-                      const Text('Calculate', style: TextStyle(fontSize: 22)),
-                ),
-                if (_isLoading && _realtimeMode) ...[
-                  const SizedBox(height: 16),
-                  const LinearProgressIndicator(
-                    key: Key('realtime-progress'),
-                    semanticsLabel: RealtimeConstants.progressLabel,
-                  ),
-                ],
-                const SizedBox(height: 32),
-                Text(
-                  'Result: $_result',
-                  style: const TextStyle(
-                      fontSize: 22, fontWeight: FontWeight.bold),
-                ),
-                if (_offerRestFallback)
-                  TextButton(
-                    key: const Key('use-rest-fallback'),
-                    style: TextButton.styleFrom(
-                      minimumSize: const Size(0, kRealtimeTouchTarget),
-                    ),
-                    onPressed: _isLoading ? null : _calculateRest,
-                    child: const Text(RealtimeConstants.useRestLabel),
-                  ),
-                if (_backend != null) Text('Backend: $_backend'),
-                if (_showTransport) const Text(RealtimeConstants.transportLine),
-                if (_responseMs != null) Text('Response time: $_responseMs ms'),
-                const SizedBox(height: 24),
-                const Divider(),
-                _buildHistory(context),
-              ],
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: Theme.of(context).colorScheme.onPrimary,
+          labelColor: Theme.of(context).colorScheme.onPrimary,
+          unselectedLabelColor:
+              Theme.of(context).colorScheme.onPrimary.withValues(alpha: 0.7),
+          tabs: const [
+            Tab(
+              key: Key('tab-rest'),
+              icon: Icon(Icons.calculate),
+              text: 'REST API',
             ),
-          ),
+            Tab(
+              key: Key('tab-websocket'),
+              icon: Icon(Icons.sync_alt),
+              text: 'WebSocket',
+            ),
+            Tab(
+              key: Key('tab-ai'),
+              icon: Icon(Icons.auto_awesome),
+              text: 'AI Assistant',
+            ),
+          ],
         ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildRestTab(context),
+          _buildWebSocketTab(context),
+          _buildAiTab(context),
+        ],
       ),
     );
   }

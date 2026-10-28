@@ -106,7 +106,7 @@ Future<void> _selectMode(WidgetTester tester, String label) async {
 }
 
 Future<void> _selectRealtime(WidgetTester tester) =>
-    _selectMode(tester, RealtimeConstants.realtimeModeLabel);
+    _selectMode(tester, 'WebSocket');
 
 Future<void> _enter(WidgetTester tester, String a, String b) async {
   await tester.enterText(find.byKey(const Key('first-number-field')), a);
@@ -115,8 +115,10 @@ Future<void> _enter(WidgetTester tester, String a, String b) async {
 }
 
 Future<void> _press(WidgetTester tester, String label) async {
-  await tester.ensureVisible(find.text(label));
-  await tester.tap(find.text(label));
+  final target = find.text(label);
+  await tester.ensureVisible(target);
+  await tester.pumpAndSettle();
+  await tester.tap(target);
   await tester.pumpAndSettle();
 }
 
@@ -130,7 +132,7 @@ void main() {
     final h = _Harness();
     await h.pump(tester);
 
-    expect(find.text(RealtimeConstants.standardModeLabel), findsOneWidget);
+    expect(find.text('REST API'), findsOneWidget);
     expect(find.byKey(const Key('realtime-status-text')), findsNothing);
     expect(h.factory.uris, isEmpty);
     await _leave(tester);
@@ -231,7 +233,7 @@ void main() {
     expect(find.text(RealtimeConstants.notConfiguredMessage), findsOneWidget);
     expect(h.factory.uris, isEmpty);
 
-    await _selectMode(tester, RealtimeConstants.standardModeLabel);
+    await _selectMode(tester, 'REST API');
     await _enter(tester, '2', '3');
     await _press(tester, 'Calculate');
 
@@ -249,12 +251,13 @@ void main() {
     await _press(tester, 'Calculate');
     expect(find.text('Result: 42'), findsOneWidget);
 
-    await _selectMode(tester, RealtimeConstants.standardModeLabel);
+    await _selectMode(tester, 'REST API');
 
     expect(find.text('Result: 0'), findsOneWidget);
     expect(find.text(RealtimeConstants.transportLine), findsNothing);
-    expect(channel.closedByClient, isTrue);
+    expect(channel.closedByClient, isFalse);
     await _leave(tester);
+    expect(channel.closedByClient, isTrue);
   });
 
   testWidgets('a pending calculation disables Calculate; editing resets it',

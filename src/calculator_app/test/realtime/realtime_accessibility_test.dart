@@ -54,7 +54,7 @@ Future<void> _pump(
 }
 
 Future<void> _selectRealtime(WidgetTester tester) async {
-  await tester.tap(find.text(RealtimeConstants.realtimeModeLabel));
+  await tester.tap(find.text('WebSocket'));
   await tester.pumpAndSettle();
 }
 
@@ -167,11 +167,27 @@ void main() {
     });
   });
 
+  Future<void> pumpModeSelector(
+    WidgetTester tester, {
+    bool realtime = false,
+    ValueChanged<bool>? onChanged,
+  }) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: RealtimeModeSelector(
+          realtime: realtime,
+          onChanged: onChanged ?? (_) {},
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+  }
+
   group('mode control', () {
     testWidgets('has a label and both options in the semantics tree',
         (tester) async {
       final handle = tester.ensureSemantics();
-      await _pump(tester);
+      await pumpModeSelector(tester);
 
       expect(
         find.bySemanticsLabel(RealtimeConstants.modeLabel),
@@ -186,7 +202,8 @@ void main() {
 
     testWidgets('is reachable by keyboard and can be chosen with Enter',
         (tester) async {
-      await _pump(tester);
+      var selected = false;
+      await pumpModeSelector(tester, onChanged: (v) => selected = v);
       final realtimeOption = find.ancestor(
         of: find.text(RealtimeConstants.realtimeModeLabel),
         matching: find.byType(TextButton),
@@ -199,11 +216,11 @@ void main() {
 
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
-      expect(find.text(RealtimeConstants.connectedLabel), findsOneWidget);
+      expect(selected, isTrue);
     });
 
     testWidgets('touch targets are at least 48 px', (tester) async {
-      await _pump(tester);
+      await pumpModeSelector(tester);
 
       for (final label in [
         RealtimeConstants.standardModeLabel,
@@ -247,6 +264,7 @@ void main() {
       await tester.enterText(find.byKey(const Key('first-number-field')), '2');
       await tester.enterText(find.byKey(const Key('second-number-field')), '3');
       await tester.ensureVisible(find.text('Calculate'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Calculate'));
       await tester.pumpAndSettle();
       final fallback = find.byKey(const Key('use-rest-fallback'));

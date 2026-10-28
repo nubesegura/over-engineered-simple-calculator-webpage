@@ -497,3 +497,98 @@ def test_verify_live_history_auto_updated_checks_rows_and_transport(tmp_path: Pa
     page_missing = _FakeLiveHistoryPage(missing_texts={web_driver.LIVE_HISTORY_DIVIDE_BY_ZERO_ROW})
     assert web_driver.verify_live_history_auto_updated(page_missing, rec_missing, tmp_path) is False
     assert rec_missing.checks["live_history_auto_updated"] is False
+
+
+def test_redact_ai_api_urls() -> None:
+    ai_custom = "https://ai.over-engineered-simple-calculator.dev.nube-segura.com/calculate"
+    ai_execute = "https://abcdef1234.execute-api.us-east-2.amazonaws.com/dev/calculate"
+    raw = f"calling {ai_custom} and {ai_execute}".encode()
+
+    redacted = e2e_redact.redact_bytes(raw, []).decode("utf-8")
+    assert ai_custom not in redacted
+    assert ai_execute not in redacted
+    assert "https://<redacted-ai-api>" in redacted
+
+
+class _FakeAiLocator:
+    def __init__(self, inner: str = "", count_val: int = 1) -> None:
+        self._inner = inner
+        self._count = count_val
+        self.clicks = 0
+        self.filled_text: str | None = None
+
+    @property
+    def first(self) -> _FakeAiLocator:
+        return self
+
+    def or_(self, other: Any) -> _FakeAiLocator:
+        return self
+
+    def click(self) -> None:
+        self.clicks += 1
+
+    def fill(self, text: str) -> None:
+        self.filled_text = text
+
+    def wait_for(self, timeout: int = 0) -> None:
+        pass
+
+    def count(self) -> int:
+        return self._count
+
+    def inner_text(self) -> str:
+        return self._inner
+
+
+class _FakeAiPage:
+    def __init__(self) -> None:
+        self.locators: dict[str, _FakeAiLocator] = {}
+
+    def get_by_role(self, role: str, name: str | None = None, **kwargs: Any) -> _FakeAiLocator:
+        key = f"{role}:{name}"
+        if key not in self.locators:
+            self.locators[key] = _FakeAiLocator()
+        return self.locators[key]
+
+    def get_by_text(self, text: str, **kwargs: Any) -> _FakeAiLocator:
+        if text not in self.locators:
+            self.locators[text] = _FakeAiLocator(inner=text)
+        return self.locators[text]
+
+    def get_by_label(self, label: str, **kwargs: Any) -> _FakeAiLocator:
+        if label not in self.locators:
+            self.locators[label] = _FakeAiLocator()
+        return self.locators[label]
+
+    def locator(self, selector: str) -> _FakeAiLocator:
+        if selector not in self.locators:
+            if selector == '[data-key="ai-conversational-answer"]':
+                self.locators[selector] = _FakeAiLocator(inner="4")
+            elif selector == '[data-key="ai-calculation-badge"]':
+                self.locators[selector] = _FakeAiLocator(inner="2 + 2 = 4")
+            else:
+                self.locators[selector] = _FakeAiLocator()
+        return self.locators[selector]
+
+
+def test_ai_web_driver_helpers() -> None:
+    page = _FakeAiPage()
+
+    # select_ai_tab
+    web_driver.select_ai_tab(page)
+    assert page.locators[f"tab:{web_driver.AI_TAB_LABEL}"].clicks == 1
+
+    # submit_ai_calculation with tool mode
+    web_driver.submit_ai_calculation(page, "What is 2 plus 2?", mode="tool")
+    assert page.locators[web_driver.AI_TOOL_MODE].clicks == 1
+    assert page.locators[f"textbox:{web_driver.AI_PROMPT_LABEL}"].filled_text == "What is 2 plus 2?"
+    assert page.locators[f"button:{web_driver.AI_CALCULATE_BUTTON}"].clicks == 1
+
+    # submit_ai_calculation with model mode
+    web_driver.submit_ai_calculation(page, "Explain 5 * 5", mode="model")
+    assert page.locators[web_driver.AI_MODEL_MODE].clicks == 1
+    assert page.locators[f"textbox:{web_driver.AI_PROMPT_LABEL}"].filled_text == "Explain 5 * 5"
+
+    # get_ai_result
+    result = web_driver.get_ai_result(page)
+    assert result == {"answer": "4", "formula": "2 + 2 = 4"}

@@ -71,6 +71,7 @@ Future<void> _calculate(WidgetTester tester) async {
   await tester.enterText(find.byKey(const Key('first-number-field')), '2');
   await tester.enterText(find.byKey(const Key('second-number-field')), '3');
   await tester.ensureVisible(find.text('Calculate'));
+  await tester.pumpAndSettle();
   await tester.tap(find.text('Calculate'));
   await tester.pumpAndSettle();
 }
@@ -323,14 +324,14 @@ void main() {
         expect(find.textContaining('Response time:'), findsNothing);
       });
 
-      testWidgets('both lines are hidden when the fields change or an '
+      testWidgets(
+          'both lines are hidden when the fields change or an '
           'operation is picked', (tester) async {
         await pumpWith(tester, {'result': '5', 'backend': 'ecs'});
         await _calculate(tester);
         expect(find.text('Backend: ecs'), findsOneWidget);
 
-        await tester.enterText(
-            find.byKey(const Key('first-number-field')), '');
+        await tester.enterText(find.byKey(const Key('first-number-field')), '');
         await tester.pump();
         expect(find.textContaining('Backend:'), findsNothing);
         expect(find.textContaining('Response time:'), findsNothing);

@@ -84,9 +84,14 @@ void main() {
     });
 
     test('the backend is null when absent or not a string', () async {
-      for (final backend in <Object?>[null, 7, ['sls'], {'a': 1}]) {
-        final client = clientAnswering(
-            (_) => _json({'result': '5', 'backend': backend}));
+      for (final backend in <Object?>[
+        null,
+        7,
+        ['sls'],
+        {'a': 1}
+      ]) {
+        final client =
+            clientAnswering((_) => _json({'result': '5', 'backend': backend}));
         expect((await client.calculate('add', 2, 3)).backend, isNull);
       }
       final absent = clientAnswering((_) => _json({'result': '5'}));

@@ -13,7 +13,6 @@ import 'package:calculator_app/live_history/live_history_status.dart';
 import 'package:calculator_app/main.dart';
 import 'package:calculator_app/realtime/realtime_address.dart';
 import 'package:calculator_app/realtime/realtime_channel.dart';
-import 'package:calculator_app/realtime/realtime_constants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -115,6 +114,11 @@ class _ScriptedHistoryStore implements HistoryStoreClient {
     }
     return _pages.removeAt(0)(limit, nextToken);
   }
+}
+
+Future<void> _selectWebSocket(WidgetTester tester) async {
+  await tester.tap(find.text('WebSocket'));
+  await tester.pumpAndSettle();
 }
 
 Future<void> _leave(WidgetTester tester) async {
@@ -234,8 +238,9 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // Still in Standard (REST) calculation mode, yet live history auto-started.
-    expect(find.text(RealtimeConstants.standardModeLabel), findsOneWidget);
+    // Default is REST API tab, switch to WebSocket tab to view live history.
+    expect(find.text('REST API'), findsOneWidget);
+    await _selectWebSocket(tester);
     expect(find.byKey(const Key('live-history-status')), findsOneWidget);
     expect(find.text(LiveHistoryConstants.liveLabel), findsOneWidget);
     expect(graphQlCalls, hasLength(1));
@@ -289,6 +294,7 @@ void main() {
       liveHistoryController: controller,
     ));
     await tester.pumpAndSettle();
+    await _selectWebSocket(tester);
 
     expect(find.text('2 + 3 = 5'), findsOneWidget);
 
@@ -374,9 +380,8 @@ void main() {
       'result': '4',
       'status': 'OK',
       'transport': 'graphql',
-      'createdAt': '2026-10-27T14:00:00Z',
+      'createdAt': '2026-10-27T14:50:00Z',
     })!;
-
     final store = _ScriptedHistoryStore()
       ..addPage([sharedCalc], nextToken: 'cursor-page-2')
       ..addPage([olderCalc], nextToken: null);
@@ -394,6 +399,7 @@ void main() {
       liveHistoryController: controller,
     ));
     await tester.pumpAndSettle();
+    await _selectWebSocket(tester);
 
     // Emit the same txId on the live channel.
     eventsChannel.receive(
@@ -419,6 +425,7 @@ void main() {
     final loadMoreButton = find.byKey(const Key('history-load-more'));
     expect(loadMoreButton, findsOneWidget);
     await tester.ensureVisible(loadMoreButton);
+    await tester.pumpAndSettle();
     await tester.tap(loadMoreButton);
     await tester.pumpAndSettle();
 
@@ -472,6 +479,7 @@ void main() {
       liveHistoryController: controller,
     ));
     await tester.pumpAndSettle();
+    await _selectWebSocket(tester);
 
     expect(controller.status, LiveHistoryStatus.notAuthorized);
     expect(find.text(LiveHistoryConstants.notAuthorizedLabel), findsOneWidget);
@@ -481,6 +489,7 @@ void main() {
     // showing the error message while keeping '3 + 4 = 7' visible!
     final refreshButton = find.byKey(const Key('history-refresh'));
     await tester.ensureVisible(refreshButton);
+    await tester.pumpAndSettle();
     await tester.tap(refreshButton);
     await tester.pumpAndSettle();
 
@@ -509,6 +518,7 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+    await _selectWebSocket(tester);
 
     expect(find.byKey(const Key('live-history-status')), findsOneWidget);
     expect(find.text(LiveHistoryConstants.invalidAddressLabel), findsOneWidget);
@@ -553,6 +563,7 @@ void main() {
       liveHistoryController: controller,
     ));
     await tester.pumpAndSettle();
+    await _selectWebSocket(tester);
 
     expect(find.text('9 + 1 = 10'), findsOneWidget);
     expect(controller.items, hasLength(1));

@@ -30,12 +30,16 @@ HEADER_SUBPROTOCOL = re.compile(rb"(?<![\w-])header-(?!<redacted>)[A-Za-z0-9_-]{
 # AppSync Events real-time WebSocket and GraphQL HTTPS endpoint URLs.
 APPSYNC_REALTIME_URL = re.compile(rb"wss?://[A-Za-z0-9.-]*\.appsync-realtime-api\.[A-Za-z0-9.-]+(?:/[^\s\"'<>\\]*)?")
 APPSYNC_API_URL = re.compile(rb"https?://[A-Za-z0-9.-]*\.appsync-api\.[A-Za-z0-9.-]+(?:/[^\s\"'<>\\]*)?")
+# AI Assistant custom domain and regional API Gateway endpoint URLs.
+AI_API_URL = re.compile(rb"(?i)https?://ai\.over-engineered-simple-calculator\.[A-Za-z0-9.-]+(?:/[^\s\"'<>\\]*)?")
+AI_EXECUTE_API_URL = re.compile(rb"(?i)https?://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com(?:/[^\s\"'<>\\]*)?")
 RESOURCES_PREFIX = "resources/"
 TEXT_SUFFIXES = {".log", ".json", ".jsonl", ".txt", ".trace", ".network", ".md"}
 PLACEHOLDER = b"<redacted>"
 HEADER_PLACEHOLDER = b"header-<redacted>"
 APPSYNC_REALTIME_PLACEHOLDER = b"wss://<redacted-appsync-realtime>"
 APPSYNC_API_PLACEHOLDER = b"https://<redacted-appsync-api>"
+AI_API_PLACEHOLDER = b"https://<redacted-ai-api>"
 
 
 def redact_bytes(data: bytes, passwords: list[str]) -> bytes:
@@ -47,6 +51,8 @@ def redact_bytes(data: bytes, passwords: list[str]) -> bytes:
     data = HEADER_SUBPROTOCOL.sub(HEADER_PLACEHOLDER, data)
     data = APPSYNC_REALTIME_URL.sub(APPSYNC_REALTIME_PLACEHOLDER, data)
     data = APPSYNC_API_URL.sub(APPSYNC_API_PLACEHOLDER, data)
+    data = AI_API_URL.sub(AI_API_PLACEHOLDER, data)
+    data = AI_EXECUTE_API_URL.sub(AI_API_PLACEHOLDER, data)
     return TOKEN_VALUE.sub(rb"\1" + PLACEHOLDER, _mask_credentials(data))
 
 

@@ -47,6 +47,11 @@ LIVE_HISTORY_PRODUCT_ROW = "6 × 7 = 42"
 LIVE_HISTORY_DIVIDE_BY_ZERO_ROW = "1 ÷ 0 = Cannot divide by zero."
 LIVE_HISTORY_WEBSOCKET_SUBTITLE = "· websocket"
 DIVIDE_BY_ZERO = "Cannot divide by zero."
+AI_TAB_LABEL = "AI Assistant"
+AI_TOOL_MODE = "Tool-Assisted (Deterministic)"
+AI_MODEL_MODE = "Direct Model (Probabilistic)"
+AI_CALCULATE_BUTTON = "Calculate with AI"
+AI_PROMPT_LABEL = "Natural Language Query"
 
 
 def run_dir_name(now: datetime | None = None) -> str:
@@ -263,6 +268,48 @@ def run_realtime(
 
     if live_history_active:
         verify_live_history_auto_updated(page, rec, out)
+
+
+def select_ai_tab(page: Any) -> None:  # pragma: no cover - needs a browser
+    """Switch to the AI Assistant tab."""
+    page.get_by_role("tab", name=AI_TAB_LABEL).or_(page.get_by_text(AI_TAB_LABEL)).first.click()
+
+
+def submit_ai_calculation(
+    page: Any,
+    sentence: str,
+    mode: str = "tool",
+) -> None:  # pragma: no cover - needs a browser
+    """Fill the natural language prompt, choose computation mode, and click Calculate with AI."""
+    if mode == "model":
+        page.get_by_text(AI_MODEL_MODE).or_(page.get_by_role("button", name=AI_MODEL_MODE)).first.click()
+    else:
+        page.get_by_text(AI_TOOL_MODE).or_(page.get_by_role("button", name=AI_TOOL_MODE)).first.click()
+
+    prompt_field = (
+        page.get_by_role("textbox", name=AI_PROMPT_LABEL)
+        .or_(page.get_by_label(AI_PROMPT_LABEL))
+        .or_(page.locator('[data-key="ai-prompt-field"]'))
+        .first
+    )
+    prompt_field.fill(sentence)
+    (
+        page.get_by_role("button", name=AI_CALCULATE_BUTTON)
+        .or_(page.get_by_text(AI_CALCULATE_BUTTON))
+        .or_(page.locator('[data-key="ai-calculate-button"]'))
+        .first.click()
+    )
+
+
+def get_ai_result(page: Any, timeout_ms: int = CALCULATE_TIMEOUT_MS) -> dict[str, str]:  # pragma: no cover
+    """Wait for AI calculation result and return dict with answer and formula."""
+    result_card = page.locator('[data-key="ai-result-card"]').or_(page.get_by_text("Request ID:")).first
+    result_card.wait_for(timeout=timeout_ms)
+    answer_locator = page.locator('[data-key="ai-conversational-answer"]').or_(page.locator('[aria-label*="answer"]'))
+    answer = str(answer_locator.first.inner_text()) if int(answer_locator.count()) > 0 else ""
+    badge_locator = page.locator('[data-key="ai-calculation-badge"]')
+    formula = str(badge_locator.first.inner_text()) if int(badge_locator.count()) > 0 else ""
+    return {"answer": answer, "formula": formula}
 
 
 def drive(

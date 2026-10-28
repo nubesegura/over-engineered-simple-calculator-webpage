@@ -85,6 +85,7 @@ jobs:
           EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
           EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
           GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL }}
         run: |
           missing=0
           # Real-time mode and live history are dev only: fail before any infrastructure step (the build step checks again).
@@ -95,6 +96,10 @@ jobs:
                 missing=1
               fi
             done
+            if [ -n "$AI_API_BASE_URL" ] && echo "$AI_API_BASE_URL" | grep -q "\.dev\."; then
+              echo "::error::AI_API_BASE_URL for prod cannot point to dev domain"
+              missing=1
+            fi
           fi
           for name in AWS_REGION ROUTE53_ZONE_ID; do
             if [ -z "${!name}" ]; then
@@ -281,6 +286,7 @@ jobs:
           EVENTS_REALTIME_DOMAIN: ${{ vars.EVENTS_REALTIME_DOMAIN }}
           EVENTS_HTTP_DOMAIN: ${{ vars.EVENTS_HTTP_DOMAIN }}
           GRAPHQL_URL: ${{ vars.GRAPHQL_URL }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL }}
           TARGET: ${{ inputs.environment }}
         run: |
           if [ "$TARGET" = "prod" ]; then
@@ -290,11 +296,18 @@ jobs:
                 exit 1
               fi
             done
+            if [ -n "$AI_API_BASE_URL" ] && echo "$AI_API_BASE_URL" | grep -q "\.dev\."; then
+              echo "::error::AI_API_BASE_URL for prod cannot point to dev domain"
+              exit 1
+            fi
           fi
           flutter pub get
           DEFINES=()
           if [ -n "$API_BASE_URL" ]; then
             DEFINES+=("--dart-define=API_BASE_URL=$API_BASE_URL")
+          fi
+          if [ -n "$AI_API_BASE_URL" ]; then
+            DEFINES+=("--dart-define=AI_API_BASE_URL=$AI_API_BASE_URL")
           fi
           if [ "$TARGET" = "dev" ]; then
             if [ -n "$WS_BASE_URL" ]; then
