@@ -68,19 +68,23 @@ class AiCalculationBreakdown {
     required this.result,
   });
 
-  final num a;
-  final num b;
+  /// Operands and result are exact decimal strings (for example `12.5`).
+  final String a;
+  final String b;
   final String operation;
-  final num result;
+  final String result;
 
   factory AiCalculationBreakdown.fromJson(Map<String, dynamic> json) {
     return AiCalculationBreakdown(
-      a: (json['a'] as num?) ?? 0,
-      b: (json['b'] as num?) ?? 0,
+      a: _decimalText(json['a']),
+      b: _decimalText(json['b']),
       operation: (json['operation'] as String?) ?? '',
-      result: (json['result'] as num?) ?? 0,
+      result: _decimalText(json['result']),
     );
   }
+
+  /// Keeps the decimal text as received; numbers are tolerated via toString().
+  static String _decimalText(Object? value) => value?.toString() ?? '0';
 
   /// Formatted mathematical expression e.g. `12.5 × 4 = 50`.
   String get formattedFormula {
@@ -120,6 +124,7 @@ class AiCalculateResponse {
     required this.language,
     required this.mode,
     required this.requestId,
+    this.answerSource,
     this.calculation,
   });
 
@@ -127,6 +132,9 @@ class AiCalculateResponse {
   final String language;
   final AiMode mode;
   final String requestId;
+
+  /// Wording source reported by the backend (`model` or `template`), if any.
+  final String? answerSource;
   final AiCalculationBreakdown? calculation;
 
   factory AiCalculateResponse.fromJson(Map<String, dynamic> json) {
@@ -146,6 +154,7 @@ class AiCalculateResponse {
       requestId: (json['request_id'] as String?) ??
           (json['requestId'] as String?) ??
           '',
+      answerSource: json['answer_source'] as String?,
       calculation: calculationBreakdown,
     );
   }
@@ -159,11 +168,12 @@ class AiCalculateResponse {
           language == other.language &&
           mode == other.mode &&
           requestId == other.requestId &&
+          answerSource == other.answerSource &&
           calculation == other.calculation;
 
   @override
   int get hashCode =>
-      Object.hash(answer, language, mode, requestId, calculation);
+      Object.hash(answer, language, mode, requestId, answerSource, calculation);
 
   @override
   String toString() =>

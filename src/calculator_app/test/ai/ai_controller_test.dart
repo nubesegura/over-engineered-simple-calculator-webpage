@@ -171,10 +171,10 @@ void main() {
           mode: AiMode.tool,
           requestId: 'req-success-123',
           calculation: AiCalculationBreakdown(
-            a: 3,
-            b: 3,
+            a: '3',
+            b: '3',
             operation: 'mul',
-            result: 9,
+            result: '9',
           ),
         ),
       );

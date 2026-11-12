@@ -121,10 +121,10 @@ void main() {
           'mode': 'tool',
           'request_id': 'req-mock-1',
           'calculation': {
-            'a': 2,
-            'b': 2,
+            'a': '2',
+            'b': '2',
             'operation': 'add',
-            'result': 4,
+            'result': '4',
           },
         };
         return http.Response(

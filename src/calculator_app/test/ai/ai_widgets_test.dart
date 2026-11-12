@@ -35,10 +35,10 @@ class _MockAiClient implements AiCalculatorClient {
       mode: AiMode.tool,
       requestId: 'mock-req-id',
       calculation: AiCalculationBreakdown(
-        a: 12.5,
-        b: 4,
+        a: '12.5',
+        b: '4',
         operation: 'mul',
-        result: 50,
+        result: '50',
       ),
     );
   }
@@ -142,10 +142,10 @@ void main() {
           mode: AiMode.tool,
           requestId: 'req-success-789',
           calculation: AiCalculationBreakdown(
-            a: 12.5,
-            b: 4,
+            a: '12.5',
+            b: '4',
             operation: 'mul',
-            result: 50,
+            result: '50',
           ),
         ),
       );

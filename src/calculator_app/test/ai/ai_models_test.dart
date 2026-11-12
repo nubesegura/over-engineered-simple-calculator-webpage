@@ -67,37 +67,72 @@ void main() {
   group('AiCalculationBreakdown', () {
     test('deserializes from JSON and formats formula', () {
       final breakdown = AiCalculationBreakdown.fromJson({
+        'a': '12.5',
+        'b': '4',
+        'operation': 'mul',
+        'result': '50',
+      });
+
+      expect(breakdown.a, '12.5');
+      expect(breakdown.b, '4');
+      expect(breakdown.operation, 'mul');
+      expect(breakdown.result, '50');
+      expect(breakdown.formattedFormula, '12.5 × 4 = 50');
+    });
+
+    test('keeps exact decimal strings from the contract', () {
+      final breakdown = AiCalculationBreakdown.fromJson({
+        'a': '121',
+        'b': '10',
+        'operation': 'div',
+        'result': '12.1',
+      });
+
+      expect(breakdown.result, '12.1');
+      expect(breakdown.formattedFormula, '121 ÷ 10 = 12.1');
+    });
+
+    test('keeps long decimals without precision loss', () {
+      final breakdown = AiCalculationBreakdown.fromJson({
+        'a': '0.1000000000000000055511151231257827',
+        'b': '3',
+        'operation': 'mul',
+        'result': '0.3000000000000000166533453693773481',
+      });
+
+      expect(breakdown.a, '0.1000000000000000055511151231257827');
+    });
+
+    test('tolerates numeric JSON values by converting them to text', () {
+      final breakdown = AiCalculationBreakdown.fromJson({
         'a': 12.5,
         'b': 4,
         'operation': 'mul',
         'result': 50,
       });
 
-      expect(breakdown.a, 12.5);
-      expect(breakdown.b, 4);
-      expect(breakdown.operation, 'mul');
-      expect(breakdown.result, 50);
       expect(breakdown.formattedFormula, '12.5 × 4 = 50');
     });
 
     test('formats other operations correctly', () {
       expect(
-        AiCalculationBreakdown(a: 10, b: 2, operation: 'add', result: 12)
+        AiCalculationBreakdown(a: '10', b: '2', operation: 'add', result: '12')
             .formattedFormula,
         '10 + 2 = 12',
       );
       expect(
-        AiCalculationBreakdown(a: 10, b: 2, operation: 'sub', result: 8)
+        AiCalculationBreakdown(a: '10', b: '2', operation: 'sub', result: '8')
             .formattedFormula,
         '10 - 2 = 8',
       );
       expect(
-        AiCalculationBreakdown(a: 10, b: 2, operation: 'div', result: 5)
+        AiCalculationBreakdown(a: '10', b: '2', operation: 'div', result: '5')
             .formattedFormula,
         '10 ÷ 2 = 5',
       );
       expect(
-        AiCalculationBreakdown(a: 10, b: 2, operation: 'unknown_op', result: 10)
+        AiCalculationBreakdown(
+                a: '10', b: '2', operation: 'unknown_op', result: '10')
             .formattedFormula,
         '10 unknown_op 2 = 10',
       );
@@ -113,10 +148,10 @@ void main() {
         'mode': 'tool',
         'request_id': 'req-abc-123',
         'calculation': {
-          'a': 12.5,
-          'b': 4,
+          'a': '12.5',
+          'b': '4',
           'operation': 'mul',
-          'result': 50,
+          'result': '50',
         },
       };
 
@@ -130,6 +165,18 @@ void main() {
       expect(response.requestId, 'req-abc-123');
       expect(response.calculation, isNotNull);
       expect(response.calculation!.formattedFormula, '12.5 × 4 = 50');
+    });
+
+    test('reads answer_source when present', () {
+      final response = AiCalculateResponse.fromJson({
+        'answer': 'ok',
+        'language': 'en',
+        'mode': 'model',
+        'request_id': 'r',
+        'answer_source': 'template',
+      });
+
+      expect(response.answerSource, 'template');
     });
 
     test('deserializes response without calculation breakdown', () {
@@ -159,11 +206,11 @@ void main() {
       expect(req1.toString(), contains('2 + 2'));
 
       const b1 =
-          AiCalculationBreakdown(a: 2, b: 2, operation: 'add', result: 4);
+          AiCalculationBreakdown(a: '2', b: '2', operation: 'add', result: '4');
       const b2 =
-          AiCalculationBreakdown(a: 2, b: 2, operation: 'add', result: 4);
+          AiCalculationBreakdown(a: '2', b: '2', operation: 'add', result: '4');
       const b3 =
-          AiCalculationBreakdown(a: 2, b: 3, operation: 'add', result: 5);
+          AiCalculationBreakdown(a: '2', b: '3', operation: 'add', result: '5');
 
       expect(b1, b2);
       expect(b1 == b3, isFalse);
