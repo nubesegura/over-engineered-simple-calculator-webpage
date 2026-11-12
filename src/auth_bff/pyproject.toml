@@ -1,0 +1,37 @@
+[project]
+name = "auth_bff"
+version = "0.1.0"
+description = "Backend for frontend of the calculator page: Cognito login, refresh and logout"
+requires-python = ">=3.13"
+# No runtime dependency is declared: the Python 3.14 Lambda runtime provides boto3 and
+# botocore. They are pinned below, in the dev extra, only to run the tests locally.
+# Local environment:  python -m venv .venv  and  pip install -e ".[dev]"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "boto3==1.43.106",
+    "botocore==1.43.106",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.9",
+    "mypy==2.3.1",
+    "import-linter==2.15",
+]
+
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+addopts = "--cov=auth_bff --cov=handler --cov-report=term-missing --cov-fail-under=85"
+pythonpath = [".", "src"]
+testpaths = ["tests"]

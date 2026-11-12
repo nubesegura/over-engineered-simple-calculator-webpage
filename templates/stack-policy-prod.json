@@ -1,0 +1,25 @@
+{
+  "Statement": [
+    {
+      "Sid": "AllowEveryUpdate",
+      "Effect": "Allow",
+      "Action": "Update:*",
+      "Principal": "*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProtectStatefulResources",
+      "Effect": "Deny",
+      "Action": ["Update:Replace", "Update:Delete"],
+      "Principal": "*",
+      "Resource": [
+        "LogicalResourceId/UserPool",
+        "LogicalResourceId/AppClient",
+        "LogicalResourceId/AppClientSecret",
+        "LogicalResourceId/PublicAppClient",
+        "LogicalResourceId/Distribution",
+        "LogicalResourceId/WebBucket"
+      ]
+    }
+  ]
+}

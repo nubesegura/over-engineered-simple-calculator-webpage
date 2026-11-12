@@ -1,0 +1,61 @@
+# SAM CLI configuration of the IAC_TOOL=cloudformation path. One section per environment, same keys.
+# Only templates/auth-bff.yaml is a SAM template; the other stacks are plain CloudFormation. The pipeline
+# calls `sam build` and `sam package` through scripts/cfn_deploy.py; parameters and tags come from
+# parameters/<env>.json and the stack outputs (templates/stacks.json gives the order), never from here,
+# and every stack is deployed with a change set guarded against deletions and replacements.
+#
+# Artifacts bucket: the shared add-on bucket of nube-segura-account-addons, one per account and Region.
+# Its name contains the account ID, so it is NOT written here: the deploy script reads it at deploy time
+# from the SSM parameter /nube-segura/account-addons/artifacts/bucket-name (us-east-2) and passes
+# `--s3-bucket <name>` to `sam package`. A missing parameter or bucket stops the deploy (fail closed).
+# resolve_s3 is never used (no SAM managed stack or bucket).
+#
+# build_in_source: the Makefile build (src/auth_bff/Makefile) runs in the source folder and writes only to
+# .aws-sam/build, so the local .venv and caches are never copied.
+version = 0.1
+
+[dev.global.parameters]
+region = "us-east-2"
+
+[dev.build.parameters]
+template_file = "templates/auth-bff.yaml"
+cached = false
+parallel = false
+build_in_source = true
+
+[dev.validate.parameters]
+template_file = "templates/auth-bff.yaml"
+lint = true
+
+[dev.package.parameters]
+s3_prefix = "over-engineered-simple-calculator-webpage/dev"
+
+[dev.deploy.parameters]
+stack_name = "stk-useast2-oecalc-auth-bff-dev"
+s3_prefix = "over-engineered-simple-calculator-webpage/dev"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = true
+fail_on_empty_changeset = false
+
+[prod.global.parameters]
+region = "us-east-2"
+
+[prod.build.parameters]
+template_file = "templates/auth-bff.yaml"
+cached = false
+parallel = false
+build_in_source = true
+
+[prod.validate.parameters]
+template_file = "templates/auth-bff.yaml"
+lint = true
+
+[prod.package.parameters]
+s3_prefix = "over-engineered-simple-calculator-webpage/prod"
+
+[prod.deploy.parameters]
+stack_name = "stk-useast2-oecalc-auth-bff-prod"
+s3_prefix = "over-engineered-simple-calculator-webpage/prod"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = true
+fail_on_empty_changeset = false
